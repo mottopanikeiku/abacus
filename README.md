@@ -1,12 +1,18 @@
 # cpu-decode
 
-A small C++ engine for single-stream CPU decoding of one pinned Qwen checkpoint.
+I built a small C++ engine for single-stream CPU decoding of one pinned Qwen checkpoint.
 
 **Question:** How close can int8 decoding get to a laptop's read-bandwidth ceiling, and how does it compare with native llama.cpp?
 
-I built the complete forward pass and FP32 KV cache in [model.cpp](src/model.cpp), with scalar and AVX2/AVX-512 matrix-vector kernels in [kernels.cpp](src/kernels.cpp). Weights are memory-mapped; offline quantization uses one FP32 scale per int8 output row. [The reference](tools/reference.py) checks the original BF16 values in FP32 arithmetic against Transformers; a separate reader measures real llama.cpp outputs.
+The complete forward pass and FP32 KV cache are in [model.cpp](src/model.cpp), with scalar and AVX2/AVX-512 matrix-vector kernels in [kernels.cpp](src/kernels.cpp). Weights are memory-mapped; the SIMD kernels widen int8 weights and multiply them with FP32 arithmetic. Offline quantization uses one FP32 scale per output row. [The reference](tools/reference.py) checks the original BF16 values in FP32 arithmetic against Transformers; a separate reader measures real llama.cpp outputs.
 
-**Result:** Short-context decoding approaches the estimated ceiling, but scalar attention leaves a long-context gap. More threads are not automatically faster.
+**Result:** At two threads and context 128, I measure **69.03 tokens/s**, or **83.1% of an estimated read-bandwidth ceiling**. The ceiling divides measured read bandwidth by modeled bytes/token; the percentage is not measured DRAM utilization. Scalar attention leaves a long-context gap, and more threads are not automatically faster.
+
+```sh
+make build
+make prepare
+make measure llama-quality traffic
+```
 
 ## Measured result
 
@@ -36,17 +42,11 @@ These are distribution checks, not task accuracy; the lower Q8_0 mean KL matters
 
 Requires Linux x86-64, C++17/OpenMP, CMake and uv; AVX-512 for the recorded kernel. [The recorded hardware/software](results/measurements/environment-engine-t1,2,4,6,12-c128-ksimd512x4-ropecached.json) is a Ryzen AI 5 PRO 340 with GCC 16.2.1. [Model checks](results/checks.json) used a 2000 MB memory cap; this is not a peak-memory measurement. Compute is local CPU with free downloads, no paid compute.
 
-```sh
-make build
-make prepare
-make measure llama-quality traffic
-```
+[llama.cpp is pinned](results/llama-preparation.json) to `6c73b3e12dc501de35fe5f6979960d06921a2f6c`, built Release with `GGML_NATIVE=ON`, CUDA/Vulkan off; [the preparation script](tools/prepare_llama.py) records the full flags. Models and raw logits stay outside git. [Methods](docs/MEASUREMENTS.md) and [baseline differences](docs/BASELINE.md) explain the comparison.
 
-[llama.cpp is pinned](results/llama-preparation.json) to `6c73b3e12dc501de35fe5f6979960d06921a2f6c`, built Release with `GGML_NATIVE=ON`, CUDA/Vulkan off; [the preparation script](tools/prepare_llama.py) records the full flags. Models and raw logits stay outside git. [Methods](docs/MEASUREMENTS.md), [baseline differences](docs/BASELINE.md) and [cold review](docs/COLD_REVIEW.md) explain the comparison.
+## Limits
 
-## Limitations
-
-- One model and laptop; clocks/temperatures were not fixed. The ceiling is a storage/read-bandwidth estimate, not measured DRAM utilization.
+- One model and laptop; clocks/temperatures were not fixed.
 - Shapes match, but llama-bench uses synthetic tokens and omits sampling; native/eager use greedy trajectories.
 - Quality uses four short prompts. Long-context numerical agreement and free-running Q8_0 generation were not measured.
 - No batched serving, speculative decoding or activation quantization; attention remains scalar within each head.
