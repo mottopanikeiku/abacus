@@ -2,6 +2,8 @@
 
 I built a small C++ engine for single-stream CPU decoding of one pinned Qwen checkpoint.
 
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/hero-dark.svg"><img alt="Tokens per second at a 128-token context for 1 to 12 threads: this decoder peaks at 69 tokens/s with 2 threads, 83% of the estimated read ceiling; llama.cpp Q8_0 matches it at 4 threads and leads at 6." src="docs/hero-light.svg" width="600"></picture>
+
 **Question:** How close can int8 decoding get to a laptop's read-bandwidth ceiling, and how does it compare with native llama.cpp?
 
 The complete forward pass and FP32 KV cache are in [model.cpp](src/model.cpp), with scalar and AVX2/AVX-512 matrix-vector kernels in [kernels.cpp](src/kernels.cpp). Weights are memory-mapped; the SIMD kernels widen int8 weights and multiply them with FP32 arithmetic. Offline quantization uses one FP32 scale per output row. [The reference](tools/reference.py) checks the original BF16 values in FP32 arithmetic against Transformers; a separate reader measures real llama.cpp outputs.
