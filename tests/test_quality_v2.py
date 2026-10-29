@@ -5,6 +5,7 @@ import json
 import math
 import os
 import shlex
+import socket
 import struct
 import subprocess
 import sys
@@ -14,6 +15,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import tools.corpus_v2 as corpus_v2
 import tools.quality_v2 as quality_v2
 from tools.corpus_v2 import (
     CORPUS_SHA256, FORMAT_CHOICES, LICENSE, LICENSE_URL, POLICY, SOURCES,
@@ -143,6 +145,67 @@ def test_corpus_rejects_pin_license_hash_or_partition_changes(changed):
         data["policy"] = dict(data["policy"], priming_tokens=0)
     with pytest.raises(ValueError):
         validate_manifest(data)
+
+
+def refuse_network(monkeypatch):
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("corpus preparation must not use the network")
+    monkeypatch.setattr(socket, "create_connection", refuse)
+    monkeypatch.setattr(socket.socket, "connect", refuse)
+
+
+def test_prepare_reproduces_the_pinned_corpus_offline(tmp_path, monkeypatch):
+    refuse_network(monkeypatch)
+    output = tmp_path / "fresh"
+    monkeypatch.setattr(sys, "argv", ["quality_v2", "prepare", "--output-dir", str(output)])
+    quality_v2.main()
+    assert file_hash(output / "corpus.json") == CORPUS_SHA256
+    for name in ("calibration-excerpt.txt", "heldout-excerpt.txt"):
+        assert (output / name).read_bytes() == (CORPUS.parent / name).read_bytes()
+    # Rerunning keeps the existing pinned files instead of rewriting them.
+    assert prepare(None, output) == load_manifest(CORPUS)
+
+
+def test_prepare_rejects_a_changed_committed_excerpt(tmp_path, monkeypatch):
+    committed = tmp_path / "committed"
+    committed.mkdir()
+    for name in ("corpus.json", "calibration-excerpt.txt", "heldout-excerpt.txt"):
+        (committed / name).write_bytes((CORPUS.parent / name).read_bytes())
+    with (committed / "heldout-excerpt.txt").open("a", encoding="utf-8") as stream:
+        stream.write(" ")
+    monkeypatch.setattr(corpus_v2, "COMMITTED", committed)
+    with pytest.raises(ValueError, match="excerpt text hash"):
+        prepare(None, tmp_path / "output")
+    assert not (tmp_path / "output" / "corpus.json").exists()
+
+
+@pytest.mark.parametrize("output", ["committed", "reused"])
+@pytest.mark.parametrize("tokenizer", ["missing", "changed"])
+def test_prepare_checks_a_supplied_tokenizer_before_reusing_a_corpus(tmp_path, monkeypatch, output, tokenizer):
+    refuse_network(monkeypatch)
+    if output == "committed":
+        directory = CORPUS.parent
+    else:
+        directory = tmp_path / "cached"
+        prepare(None, directory)
+    model = tmp_path / "tokenizer"
+    model.mkdir()
+    if tokenizer == "changed":
+        for name in ("tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt"):
+            (model / name).write_text("{}")
+    with pytest.raises(ValueError, match="missing" if tokenizer == "missing" else "checksum mismatch"):
+        prepare(model, directory)
+
+
+def test_prepare_retokenizes_committed_excerpts_with_the_pinned_tokenizer(tmp_path, monkeypatch):
+    model = os.environ.get("CPU_DECODE_MODEL")
+    if not model:
+        pytest.skip("Set CPU_DECODE_MODEL to re-tokenize the committed excerpts with the pinned tokenizer")
+    refuse_network(monkeypatch)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    # Fresh copy, reuse of that copy and the committed directory all re-tokenize.
+    for directory in (tmp_path / "fresh", tmp_path / "fresh", CORPUS.parent):
+        assert prepare(Path(model), directory) == load_manifest(CORPUS)
 
 
 def test_manifest_pin_prevents_rehashing_altered_tokens(tmp_path):
@@ -498,9 +561,7 @@ def test_every_quality_stage_rejects_archived_destinations_before_inputs(tmp_pat
     with pytest.raises(ValueError, match="overwrite v1"):
         compare(Namespace(output=tmp_path / "new.json", split="calibration", selection=archived))
     with pytest.raises(ValueError, match="overwrite v1"):
-        prepare(tmp_path / "absent-model", ROOT / "results", tmp_path / "raw")
-    with pytest.raises(ValueError, match="overwrite v1"):
-        prepare(tmp_path / "absent-model", tmp_path / "output", ROOT / "results/raw")
+        prepare(tmp_path / "absent-model", ROOT / "results")
     with pytest.raises(ValueError, match="overwrite v1"):
         write_json(archived, {})
     assert file_hash(archived) == before

@@ -22,7 +22,11 @@ or, the Modern Prometheus* (1818), [ebook 84](https://www.gutenberg.org/ebooks/8
 The held-out excerpt is from Jane Austen's *Pride and Prejudice* (1813),
 [ebook 1342](https://www.gutenberg.org/ebooks/1342). These works are public domain
 in the United States; copyright status outside the United States must be
-checked locally. Source downloads retain their original notices outside git.
+checked locally. I downloaded both ebooks on 2026-10-06. By 2026-10-29 Project
+Gutenberg had changed the *Frankenstein* file, so its fresh download no longer
+matches the recorded SHA-256; the *Pride and Prejudice* file still did.
+Preparation therefore copies the committed excerpts and manifest, which match
+every pin, and needs no network.
 Published excerpts contain only book text, without source-service branding.
 See the source service's [license and redistribution terms](https://www.gutenberg.org/policy/license.html).
 

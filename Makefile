@@ -65,7 +65,7 @@ prepare: build
 	$(RUN) uv run python -m tools.prepare_llama --model $(MODEL) --cache $(CACHE) --jobs 4 --output $(RESULTS)/llama-preparation.json
 	$(RUN) cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCPU_DECODE_NATIVE=ON -DCPU_DECODE_LLAMA_ROOT="$(LLAMA_ROOT)"
 	$(RUN) cmake --build build --target llama-logits -j4
-	$(RUN) uv run python -m tools.quality_v2 prepare --model $(MODEL) --output-dir $(RESULTS) --raw-dir $(RAW)/sources
+	$(RUN) uv run python -m tools.quality_v2 prepare --model $(MODEL) --output-dir $(RESULTS)
 
 oracle:
 	$(RUN) uv run python -m tools.quality_v2 oracle --model $(MODEL) --corpus $(RESULTS)/corpus.json --raw-dir $(RAW) --output $(RESULTS)/oracle-summary.json

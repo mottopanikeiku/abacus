@@ -2,7 +2,9 @@
 """Pinned, book-disjoint public-domain calibration and held-out token windows.
 
 Preparation fixes the selection before any candidate runs. Only short excerpts
-and token IDs are published; complete source downloads remain in the raw directory.
+and token IDs are published. The committed excerpts and manifest are the source
+of truth: Project Gutenberg has since changed the pinned Frankenstein file, so a
+fresh download no longer matches its recorded SHA-256, and none is needed.
 """
 import os
 import sys
@@ -13,7 +15,7 @@ if not __package__:
 import argparse
 import hashlib
 import json
-import urllib.request
+import shutil
 from pathlib import Path
 
 from tools.download_model import FILES, MODEL_ID, REVISION, file_hash
@@ -49,6 +51,7 @@ POLICY = {
 FORMAT_CHOICES = ((32, "f16"), (64, "f32"), (64, "f16"), (128, "f16"))
 CORPUS_SHA256 = "05ee7119f5b639e88c174001628127b82bb840752fedea1c3e0b99db51d119f4"
 ROOT = Path(__file__).resolve().parents[1]
+COMMITTED = ROOT / "results/v2"  # Committed manifest and excerpts that match every pin.
 
 
 def protect_destination(path: Path, root: Path = ROOT) -> Path:
@@ -122,66 +125,58 @@ def load_manifest(path: Path) -> dict:
     return data
 
 
-def prepare(model: Path, output_dir: Path, raw_dir: Path) -> dict:
-    protect_destination(output_dir)
-    protect_destination(raw_dir)
+def check_tokenizer(model: Path, data: dict, directory: Path) -> None:
+    """Require the pinned tokenizer files, then re-derive every window from its excerpt text."""
     from transformers import AutoTokenizer
 
-    destination = output_dir / "corpus.json"
-    if destination.exists():
-        return load_manifest(destination)
     # Tokenizer-only verification avoids loading model weights during preparation.
     for name in ("tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt"):
         size, algorithm, expected = FILES[name]
-        if (model / name).stat().st_size != size or file_hash(model / name, algorithm) != expected:
+        path = model / name
+        if not path.is_file():
+            raise ValueError(f"Pinned tokenizer file missing: {name}")
+        if path.stat().st_size != size or file_hash(path, algorithm) != expected:
             raise ValueError("Pinned tokenizer checksum mismatch")
     tokenizer = AutoTokenizer.from_pretrained(str(model), local_files_only=True, trust_remote_code=False, use_fast=True)
-    raw_dir.mkdir(parents=True, exist_ok=True)
+    for split, stored in data["sources"].items():
+        excerpt = (directory / stored["excerpt"]).read_text(encoding="utf-8")
+        tokens = [token for window in data["windows"] if window["split"] == split for token in window["tokens"]]
+        if tokenizer.encode(excerpt, add_special_tokens=False) != tokens:
+            raise ValueError("Committed excerpt no longer tokenizes to the pinned windows")
+
+
+def prepare(model: Path | None, output_dir: Path) -> dict:
+    """Copy the hash-pinned committed corpus; with a pinned tokenizer, also re-derive its windows.
+
+    Needs no network. The excerpt text must tokenize back to exactly the committed token windows,
+    including when an existing corpus is reused.
+    """
+    protect_destination(output_dir)
+    destination = output_dir / "corpus.json"
+    source = output_dir if destination.exists() else COMMITTED
+    data = load_manifest(source / "corpus.json")
+    if model is not None:
+        check_tokenizer(model, data, source)
+    if source == output_dir:
+        return data
     output_dir.mkdir(parents=True, exist_ok=True)
-    data = {"model_id": MODEL_ID, "revision": REVISION, "policy": POLICY, "sources": {}, "windows": []}
-    for split, source in SOURCES.items():
-        path = raw_dir / f"{source['id']}.txt"
-        protect_destination(path)
-        if not path.exists():
-            with urllib.request.urlopen(source["url"], timeout=60) as response:
-                path.write_bytes(response.read())
-        if file_hash(path) != source["sha256"]:
-            raise ValueError("Source changed since pinning; do not silently substitute a different edition")
-        text = path.read_text(encoding="utf-8").replace("\r\n", "\n")
-        anchor = text.index(source["body_anchor"])
-        end = text.index("*** END OF THE PROJECT GUTENBERG EBOOK", anchor)
-        body = text[anchor:end]
-        all_ids = tokenizer.encode(body, add_special_tokens=False)
-        count = POLICY[f"{split}_windows"] * 513
-        if len(all_ids) < count:
-            raise ValueError("Pinned source does not contain enough tokens")
-        selected = all_ids[:count]
-        excerpt = tokenizer.decode(selected, skip_special_tokens=False, clean_up_tokenization_spaces=False)
-        if tokenizer.encode(excerpt, add_special_tokens=False) != selected:
-            raise ValueError("Selected token boundary does not round-trip to the attributed text")
-        excerpt_name = f"{split}-excerpt.txt"
-        protect_destination(output_dir / excerpt_name)
-        (output_dir / excerpt_name).write_text(excerpt, encoding="utf-8")
-        data["sources"][split] = dict(source, license=LICENSE, license_url=LICENSE_URL,
-            excerpt=excerpt_name, excerpt_sha256=file_hash(output_dir / excerpt_name),
-            excerpt_tokens_sha256=digest_json(selected), retrieved_date="2026-10-06")
-        for index in range(POLICY[f"{split}_windows"]):
-            tokens = selected[index * 513:(index + 1) * 513]
-            data["windows"].append({"id": f"{split}-{index:02d}", "split": split,
-                "source_id": source["id"], "source_token_start": index * 513,
-                "tokens": tokens, "tokens_sha256": digest_json(tokens)})
-    validate_manifest(data, output_dir)
-    write_json(destination, data, exclusive=True)
+    for stored in data["sources"].values():
+        excerpt = output_dir / stored["excerpt"]
+        protect_destination(excerpt)
+        if excerpt.resolve() != (COMMITTED / stored["excerpt"]).resolve():
+            shutil.copyfile(COMMITTED / stored["excerpt"], excerpt)
+    protect_destination(destination)
+    with destination.open("xb") as stream:
+        stream.write((COMMITTED / "corpus.json").read_bytes())
     return load_manifest(destination)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", type=Path, required=True)
+    parser.add_argument("--model", type=Path, help="Pinned snapshot; when given, also re-tokenize the committed excerpts")
     parser.add_argument("--output-dir", type=Path, default=Path("results/v2"))
-    parser.add_argument("--raw-dir", type=Path, default=Path("external/quality-v2/sources"))
     args = parser.parse_args()
-    data = prepare(args.model, args.output_dir, args.raw_dir)
+    data = prepare(args.model, args.output_dir)
     print(json.dumps({"corpus": str(args.output_dir / "corpus.json"), "sha256": file_hash(args.output_dir / "corpus.json"), "positions": {split: POLICY[f"{split}_windows"] * 256 for split in SOURCES}}, indent=2))
 
 
