@@ -1,4 +1,4 @@
-# cpu-decode
+# Abacus
 
 <!-- FINAL_RESULT_START -->
 **v2 result:** My pinned VNNI/int16 decoder beat llama.cpp Q8_0 in **all six pre-specified cloud cells**, at **1.090–1.531× paired throughput**. This is **one virtual host with worker-lifetime CPU binding**, not unchanged laptop CLI performance. My selected weights improve KL agreement but slightly worsen perplexity.
@@ -60,7 +60,7 @@ Host load, clocks and NUMA are uncontrolled; I have no cloud read-bandwidth ceil
 
 ## Reproduce and attribution
 
-Linux x86-64, C++17/OpenMP, CMake and uv. [Methods](docs/MEASUREMENTS.md) cover pinned downloads, numerical checks, cloud execution and v3 reproduction; [baseline differences](docs/BASELINE.md) explain each comparison.
+Linux x86-64, C++17/OpenMP, CMake and uv. [Methods](docs/MEASUREMENTS.md) cover pinned downloads, numerical checks, cloud execution and v3 reproduction; [baseline differences](docs/BASELINE.md) explain each comparison. Abacus was called cpu-decode: the `cpu-decode` binary, result schemas, Modal resource names and committed evidence keep that historical name.
 
 [Qwen](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct) weights: Apache-2.0; my decoder: MIT. [Transformers](https://github.com/huggingface/transformers): oracle. [llama.cpp](https://github.com/ggml-org/llama.cpp): baseline. [Prompt-lookup attribution](https://github.com/apoorvumang/prompt-lookup-decoding) and [prior work](docs/PRIOR_WORK.md).
 

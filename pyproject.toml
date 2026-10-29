@@ -1,5 +1,5 @@
 [project]
-name = "cpu-decode"
+name = "abacus"
 version = "0.1.0"
 description = "Measure a small Qwen CPU decoder against bandwidth and llama.cpp"
 requires-python = ">=3.12,<3.13"
