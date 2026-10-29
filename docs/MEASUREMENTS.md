@@ -79,6 +79,20 @@ The oracle keeps one widened layer at a time and passes a small hidden-state fil
 
 `ctest --test-dir build --output-on-failure` includes batched-forward, prefix-boundary replay and int8-cache checks. `CPU_DECODE_QUANT_MODEL="$INT8" CPU_DECODE_KERNEL=vnni16 uv run pytest -q tests/test_v3.py` additionally compares real fixed-prompt greedy tokens and sparse logits between the single-token and batch paths.
 
+### Authored release prompts
+
+[Six authored prompts](../configs/release-prompts.json) go beyond the four short v1 correctness prompts and the fiction corpus. They are a Python and a TypeScript completion, JSON output, a units calculation, a French-to-English translation with an accented name, and a configuration edit. `tools.reference --quant-kv f16` scores the shipped g64f16 weights with their default F16 cache against the BF16-storage/FP32-arithmetic oracle; the unquantized comparison always keeps F32 KV. Each comparison records its engine, weights, config and token hashes.
+
+```sh
+nice -n 19 uv run python -m tools.reference --model "$MODEL" --quant-model "$INT8" --quant-kv f16 \
+  --prompts configs/release-prompts.json --threads 2 --steps 16 --kernel simd512x4 \
+  --output results/v3/release-prompts.json
+uv run python -m tools.summarize_quality --input results/v3/release-prompts.json \
+  --output results/v3/release-prompts-summary.json
+```
+
+In [the summary](../results/v3/release-prompts-summary.json), the unquantized engine stays within 0.000387 absolute logit error at all 476 teacher-forced positions and matches all 96 greedy tokens. The g64f16/F16-KV path agrees on top-1 at 462 of 476 positions (97.06%), with mean KL 0.00482 and maximum 0.227 nats. Five of six sixteen-token greedy continuations match the oracle exactly; the Python completion diverges. This path uses FP32 activations (`simd512x4`), not the int16 path timed in the cloud. Six prompts are a numerical check, not task accuracy.
+
 ## v2: matched F16 KV and the best measured CPU baseline
 
 The v2 tools write only under `results/v2`; the original results and the archived protocol below are unchanged. This is still single-stream decode on one pinned Qwen2.5-0.5B-Instruct model, not prompt processing, batched serving or a downstream-task benchmark. Native and llama.cpp use F16 K/V and native CPU Release builds. The baseline is the verified Q8_0 GGUF and commit in `results/llama-preparation.json`, converted from the same BF16 snapshot as the native artifact. Formats need not be numerically identical: native group size/scale dtype and quality are recorded separately.

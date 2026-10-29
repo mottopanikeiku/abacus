@@ -93,7 +93,7 @@ def model_path() -> Path:
     return model
 
 
-def integration(tmp_path: Path, quantized: bool) -> dict:
+def integration(tmp_path: Path, quantized: bool, quant_kv: str = "f32") -> dict:
     root = Path(__file__).resolve().parents[1]
     model = model_path()
     engine = Path(os.environ.get("CPU_DECODE_ENGINE", str(root / "build" / "cpu-decode")))
@@ -105,7 +105,7 @@ def integration(tmp_path: Path, quantized: bool) -> dict:
         directory = os.environ.get("CPU_DECODE_QUANT_MODEL")
         if not directory:
             pytest.skip("Set CPU_DECODE_QUANT_MODEL to test the offline int8 model")
-        command += ["--quant-model", directory]
+        command += ["--quant-model", directory, "--quant-kv", quant_kv]
     completed = subprocess.run(command, cwd=root, text=True, capture_output=True)
     assert completed.returncode == 0, completed.stderr + completed.stdout[-4000:]
     metrics = json.loads(output.read_text())
@@ -125,11 +125,27 @@ def test_pinned_bf16_weights_fp32_logits_and_exact_greedy(tmp_path) -> None:
         assert len(case["positions"]) == len(case["prompt_tokens"]) + 7
 
 
-def test_pinned_int8_per_position_top1_and_kl(tmp_path) -> None:
-    metrics = integration(tmp_path, True)
+@pytest.mark.parametrize("quant_kv", ["f32", "f16"])
+def test_pinned_int8_per_position_top1_and_kl(tmp_path, quant_kv) -> None:
+    metrics = integration(tmp_path, True, quant_kv)
     quantized = metrics["comparisons"][1]
     assert quantized["label"] == "int8"
     assert quantized["quality_reporting_only"]
+    from tools.download_model import file_hash
+
+    for comparison in metrics["comparisons"]:
+        expected_cache = "f32" if comparison["label"] == "bf16-fp32" else quant_kv
+        assert all(case["engine_settings"]["kv_dtype"] == expected_cache for case in comparison["prompts"])
+        assert set(comparison["artifacts"]) == {"engine_sha256", "weights_sha256", "config_sha256", "tokens_sha256"}
+        root = Path(__file__).resolve().parents[1]
+        engine = Path(os.environ.get("CPU_DECODE_ENGINE", root / "build/cpu-decode"))
+        model = model_path() if comparison["label"] == "bf16-fp32" else Path(os.environ["CPU_DECODE_QUANT_MODEL"])
+        assert comparison["artifacts"] == {
+            "engine_sha256": file_hash(engine),
+            "weights_sha256": file_hash(model / "model.safetensors"),
+            "config_sha256": file_hash(model / "config.json"),
+            "tokens_sha256": file_hash(tmp_path / "raw/tokens.json"),
+        }
     for case in quantized["prompts"]:
         assert 0.0 <= case["top1_agreement"] <= 1.0
         for row in case["positions"]:

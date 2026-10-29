@@ -137,9 +137,10 @@ def compare_engine(args, oracle: dict, model: Path, label: str) -> dict:
     import numpy as np
 
     cases = []
+    cache_type = "f32" if label == "bf16-fp32" else args.quant_kv
     for case in oracle["prompts"]:
         prefix = args.raw_dir / f"{case['id']}-{label}"
-        common = [str(args.engine.resolve()), "--model", str(model.resolve()), "--threads", str(args.threads), "--kernel", args.kernel, "--kv", "f32"]
+        common = [str(args.engine.resolve()), "--model", str(model.resolve()), "--threads", str(args.threads), "--kernel", args.kernel, "--kv", cache_type]
         command = [common[0], "logits", *common[1:], "--tokens", ",".join(map(str, case["tokens"])), "--output", str(prefix)]
         subprocess.run(command, check=True)
         metadata = json.loads(prefix.with_suffix(".json").read_text())
@@ -164,7 +165,13 @@ def compare_engine(args, oracle: dict, model: Path, label: str) -> dict:
             # Quantization quality is a measurement, not an assumed guarantee.
             passed = (args.quant_max_kl is None or maximum_kl <= args.quant_max_kl) and (args.quant_min_top1 is None or top1_fraction >= args.quant_min_top1)
         cases.append({"id": case["id"], "prompt_tokens": case["prompt_tokens"], "teacher_forced_tokens": case["tokens"], "reference_generated_tokens": case["generated_tokens"], "candidate_generated_tokens": generation["generated_tokens"], "exact_greedy_match": exact_greedy, "top1_agreement": top1_fraction, "max_kl_reference_candidate_nats": maximum_kl, "mean_kl_reference_candidate_nats": sum(row["kl_reference_candidate_nats"] for row in metrics) / len(metrics), "passed": passed, "positions": metrics, "engine_settings": metadata, "commands": [command, generate_command]})
-    return {"label": label, "model_directory": str(model.resolve()), "quality_reporting_only": label == "int8" and args.quant_max_kl is None and args.quant_min_top1 is None, "passed": all(case["passed"] for case in cases), "prompts": cases}
+    return {"label": label, "model_directory": str(model.resolve()),
+            "artifacts": {"engine_sha256": file_hash(args.engine),
+                          "weights_sha256": file_hash(model / "model.safetensors"),
+                          "config_sha256": file_hash(model / "config.json"),
+                          "tokens_sha256": file_hash(args.tokens_file)},
+            "quality_reporting_only": label == "int8" and args.quant_max_kl is None and args.quant_min_top1 is None,
+            "passed": all(case["passed"] for case in cases), "prompts": cases}
 
 
 def run_comparison(args) -> dict:
@@ -187,6 +194,8 @@ def main() -> None:
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--engine", type=Path, default=Path("build/cpu-decode"))
     parser.add_argument("--quant-model", type=Path)
+    parser.add_argument("--quant-kv", choices=("f32", "f16"), default="f32",
+                        help="Cache precision for the quantized candidate; unquantized correctness always uses F32")
     parser.add_argument("--prompts", type=Path, default=Path("configs/prompts.json"))
     parser.add_argument("--tokens-file", type=Path)
     parser.add_argument("--output", type=Path, default=Path("results/correctness.json"))
