@@ -4,7 +4,7 @@
 **v2 result:** My pinned VNNI/int16 decoder beat llama.cpp Q8_0 in **all six pre-specified cloud cells**, at **1.090–1.531× paired throughput**. This is **one virtual host with worker-lifetime CPU binding**, not unchanged laptop CLI performance. My selected weights improve KL agreement but slightly worsen perplexity.
 <!-- FINAL_RESULT_END -->
 
-I wrote the C++ [decoder](src/model.cpp), [kernels](src/kernels.cpp) and [attention](src/attention.cpp) from scratch.
+I wrote the C++ [decoder](src/model.cpp), [kernels](src/kernels.cpp) and [attention](src/attention.cpp) from scratch; weights are memory-mapped. The cloud result quantizes activations to signed int16 for AVX-512 VNNI integer dot products. The default `simd512x4` kernel instead widens int8 weights and multiplies them with FP32 arithmetic.
 
 ## v2 quality
 
@@ -19,7 +19,7 @@ I selected g64f16 through [four-format calibration](results/v2/format-calibratio
 
 ## v2 cloud timing
 
-The host is **AMD Zen 4 EPYC (family 25, model 17; the model name wasn't exposed)**, identified from family/model, not an observed SKU. The sandbox exposes 24 virtual CPUs, not proven dedicated physical cores. Both engines use F16 KV, matching strict CPU sets and fresh GCC 12.2.0 `-march=native` builds.
+The host is an **AMD Zen 4 EPYC**, inferred from [CPUID family 25/model 17](https://docs.amd.com/api/khub/documents/LZ~6p62H~zRDhkNiPAE9NQ/content), not an observed SKU, with 24 virtual CPUs, not proven dedicated cores. Both engines use F16 KV, matching strict CPU sets and fresh GCC 12.2.0 `-march=native` builds.
 
 | Threads | Initial context | Native tokens/s | llama tokens/s | Paired ratio | Individual 95% CI |
 |---:|---:|---:|---:|---:|---:|
@@ -30,9 +30,9 @@ The host is **AMD Zen 4 EPYC (family 25, model 17; the model name wasn't exposed
 | 2 | 4096 | 45.312 | 29.774 | 1.5306 | [1.4643, 1.5969] |
 | 4 | 4096 | 68.643 | 49.774 | 1.3627 | [1.2594, 1.4882] |
 
-I retained sixteen 128-forward pairs per cell in eight ABBA quartets. The clock includes LM head/argmax and the final consumed token; load, prefill, warmup and rewind are excluded. Paired medians are not ratios of displayed medians. I bootstrap quartets 20,000 times: per-cell, not simultaneous intervals. Runtime and flash-selection pilots are excluded.
+I retained sixteen 128-forward pairs per cell in eight ABBA quartets. Both engines prefill the same seed IDs, then decode their own greedy tokens. The clock includes LM head/argmax and the final consumed token; load, prefill, warmup and rewind are excluded. Paired medians are not ratios of displayed medians. I bootstrap quartets 20,000 times: per-cell, not simultaneous intervals. Runtime and flash-selection pilots are excluded.
 
-Native holds public `CpuBinding` for its worker lifetime; inactive native execution is stopped and the actual GGML pool paused outside clocks. llama.cpp selects flash ON/OFF/AUTO by pilot, uses poll50 and enables repacking; no repacked buffer was selected. [Raw samples](results/v2/cloud-vnni/final/raw.json), [spreads](results/v2/cloud-vnni/final/summary.json) and [methods](docs/MEASUREMENTS.md) retain provenance and failed work. [Estimated total cost](results/v2/cloud-vnni/run-cost.json): **$1.6074**, not an invoice.
+Native holds public `CpuBinding` for its worker lifetime; idle engines are paused outside clocks. llama.cpp selects flash ON/OFF/AUTO by pilot, uses poll50 and enables repacking; no repacked buffer was selected. [Raw samples](results/v2/cloud-vnni/final/raw.json), [spreads](results/v2/cloud-vnni/final/summary.json) and [methods](docs/MEASUREMENTS.md) retain provenance and failed work. [Estimated total cost](results/v2/cloud-vnni/run-cost.json): **$1.6074**, not an invoice.
 
 My separate [earlier AVX2/FP32 run](results/v2/cloud/summary.json) completed only 2/6 cells and lost both, at 0.4108× and 0.3079×. Different hosts do not establish a causal VNNI speedup.
 
@@ -56,11 +56,11 @@ Centered KV saves **45.3%** versus F16 but remains numerically worse. Storage in
 I did **not** run the full 15-cell, nine-configuration laptop matrix. Cloud v2 results do not measure v3 batching, lookup or int8-KV speed.
 <!-- FINAL_TABLE_END -->
 
-Host load, clocks and NUMA are uncontrolled; I have no cloud read-bandwidth ceiling. This is one model, not downstream-task accuracy or batched serving. Lookup exactness is relative to its chosen numerical path. [Earlier short-window measurements](results/v2/int16-shipped-short/summary.json) remain development evidence.
+Host load, clocks and NUMA are uncontrolled; I have no cloud read-bandwidth ceiling. This is one model, not downstream-task accuracy or batched serving. Lookup exactness is relative to its chosen numerical path. [Earlier short-window measurements](results/v2/int16-shipped-short/summary.json) remain development evidence. My [archived v1 laptop comparison](results/tables.md), with FP32-arithmetic int8 and FP32 KV, led Q8_0 in only 3 of 15 cells.
 
 ## Reproduce and attribution
 
-Linux x86-64, C++17/OpenMP, CMake and uv. [Methods](docs/MEASUREMENTS.md) cover pinned downloads, numerical checks, cloud execution, v3 reproduction and the [AMD identification source](https://docs.amd.com/api/khub/documents/LZ~6p62H~zRDhkNiPAE9NQ/content).
+Linux x86-64, C++17/OpenMP, CMake and uv. [Methods](docs/MEASUREMENTS.md) cover pinned downloads, numerical checks, cloud execution and v3 reproduction; [baseline differences](docs/BASELINE.md) explain each comparison.
 
 [Qwen](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct) weights: Apache-2.0; my decoder: MIT. [Transformers](https://github.com/huggingface/transformers): oracle. [llama.cpp](https://github.com/ggml-org/llama.cpp): baseline. [Prompt-lookup attribution](https://github.com/apoorvumang/prompt-lookup-decoding) and [prior work](docs/PRIOR_WORK.md).
 
