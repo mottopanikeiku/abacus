@@ -1,4 +1,5 @@
 #include "decode.hpp"
+#include "kv_cache.hpp"
 #include "simd_math.hpp"
 #include <algorithm>
 #include <atomic>
@@ -630,9 +631,96 @@ void vnni16_tests() {
         else require(std::memcmp(&baseline, &output, sizeof(float)) == 0, "int16 long-row thread invariant");
     }
 }
+#if defined(__x86_64__) || defined(__i386__)
+void attention_order_tests() {
+    if (!__builtin_cpu_supports("avx512f")) return;
+    constexpr size_t capacity = 191, kvheads = 2, key_blocks = 3;
+    constexpr float pattern[]{32752, .125f, -32752, -.0625f, 0x1p-24f, -0x1p-24f, 1.75f, -1.5f};
+    constexpr int bytes[]{127, 1, -127, -1, 63, -64, 2, -3};
+    decode::ThreadPool pool(2);
+    for (size_t dim : {size_t(16), size_t(32), size_t(48), size_t(64), size_t(128)})
+    for (size_t groups : {size_t(1), size_t(2), size_t(4), size_t(6), size_t(7), size_t(8)}) {
+        size_t heads = groups * kvheads, stride = kvheads * dim;
+        std::vector<float> q(heads * dim), k(key_blocks * 64 * stride), v(capacity * stride);
+        std::vector<uint16_t> kh(k.size()), vh(v.size());
+        std::vector<int8_t> kb(k.size()), vb(v.size());
+        std::vector<float> key_scales(capacity * kvheads, 1), value_scales(key_scales.size());
+        std::vector<float> expected(q.size()), actual(q.size());
+        decode::AttentionWorkspace workspace(capacity + 64, heads, dim);
+        for (size_t t = 0; t < capacity; ++t) for (size_t kv = 0; kv < kvheads; ++kv) {
+            value_scales[t * kvheads + kv] = float(1 + (t * 3 + kv) % 19) / 127;
+            for (size_t j = 0; j < dim; ++j) {
+                size_t index = t * stride + kv * dim + j, phase = (t + 3 * kv + j) % 8;
+                v[index] = std::ldexp(pattern[phase], (j + kv) % 3 == 0 ? 90 : (j + kv) % 3 == 1 ? -70 : 0);
+                vh[index] = decode::float_half(pattern[phase]);
+                vb[index] = int8_t(bytes[phase]);
+            }
+        }
+        for (auto type : {decode::CacheType::f32, decode::CacheType::f16, decode::CacheType::i8})
+        for (size_t length : {size_t(1), size_t(15), size_t(16), size_t(17), size_t(63), size_t(64), size_t(65),
+                              size_t(79), size_t(80), size_t(81), size_t(127), size_t(128), size_t(129), capacity}) {
+            // Zero logits give exactly known local probabilities and block
+            // masses, isolating the ascending-token and ascending-block FMAs.
+            std::fill(expected.begin(), expected.end(), 0);
+            for (size_t h = 0; h < heads; ++h) for (size_t begin = 0; begin < length; begin += 64) {
+                size_t end = std::min(length, begin + 64), kv = h / groups;
+                float probability = 1 / float(end - begin), coefficient = float(end - begin) / float(length);
+                for (size_t j = 0; j < dim; ++j) {
+                    float weighted = 0;
+                    for (size_t t = begin; t < end; ++t) {
+                        size_t index = t * stride + kv * dim + j;
+                        float value = type == decode::CacheType::f32 ? v[index] :
+                                      type == decode::CacheType::f16 ? decode::half_float(vh[index]) :
+                                      float(vb[index]) * value_scales[t * kvheads + kv];
+                        weighted = std::fma(value, probability, weighted);
+                    }
+                    expected[h * dim + j] = std::fma(weighted, coefficient, expected[h * dim + j]);
+                }
+            }
+            std::fill(actual.begin(), actual.end(), std::numeric_limits<float>::quiet_NaN());
+            if (type == decode::CacheType::i8)
+                decode::detail::attention_quantized(q.data(), kb.data(), vb.data(), key_scales.data(), value_scales.data(),
+                                                    nullptr, actual.data(), length, heads, kvheads, dim, key_blocks, pool, workspace, false);
+            else
+                decode::attention(q.data(), type == decode::CacheType::f16 ? static_cast<const void*>(kh.data()) : k.data(),
+                                  type == decode::CacheType::f16 ? static_cast<const void*>(vh.data()) : v.data(),
+                                  type, actual.data(), length, heads, kvheads, dim, key_blocks, pool, workspace);
+            require(std::memcmp(actual.data(), expected.data(), actual.size() * sizeof(float)) == 0,
+                    "attention value/merge FMA order and cache-scale order across vector/block tails");
+        }
+    }
+}
+#endif
+void quantized_attention_tail_tests() {
+    constexpr size_t capacity = 129, kvheads = 2;
+    decode::ThreadPool pool(2);
+    for (size_t dim : {size_t(16), size_t(32), size_t(48), size_t(64), size_t(128)})
+    for (size_t groups : {size_t(1), size_t(3), size_t(8), size_t(16)}) {
+        size_t heads = kvheads * groups, stride = kvheads * dim;
+        std::vector<float> q(heads * dim), k(capacity * stride), v(k.size()), expected(q.size()), actual(q.size());
+        for (size_t j = 0; j < q.size(); ++j) q[j] = std::sin(float(j) * .23f) * .7f;
+        for (size_t j = 0; j < k.size(); ++j) {
+            k[j] = 4 + float(j % dim % 3) + std::cos(float(j) * .19f);
+            v[j] = std::sin(float(j) * .11f) * (.25f * float(1 + j / stride % 7));
+        }
+        for (auto type : {decode::CacheType::i8, decode::CacheType::i8_centered}) {
+            decode::KvCache cache(type, capacity, heads, kvheads, dim);
+            decode::AttentionWorkspace reference(capacity + 64, heads, dim), workspace(capacity + 64, heads, dim);
+            for (size_t t = 0; t < capacity; ++t) cache.store(t, k.data() + t * stride, v.data() + t * stride);
+            // Rewinding below the frozen mean prefix must still select raw
+            // keys, including vector-sized dimensions and scalar GQA groups.
+            for (size_t length : {size_t(63), size_t(64), size_t(65), size_t(79), capacity}) {
+                cache.attend(q.data(), expected.data(), length, pool, reference, true);
+                cache.attend(q.data(), actual.data(), length, pool, workspace);
+                for (size_t j = 0; j < actual.size(); ++j)
+                    near(actual[j], expected[j], 8e-6, "int8 attention raw-prefix/paired-vector/block tails");
+            }
+        }
+    }
+}
 void attention_edge_tests() {
-    for (size_t groups : {size_t(1), size_t(2), size_t(4), size_t(6), size_t(7), size_t(8), size_t(16)})
-    for (size_t dim : {size_t(17), size_t(32), size_t(128)}) {
+    for (size_t groups : {size_t(1), size_t(2), size_t(3), size_t(4), size_t(6), size_t(7), size_t(8), size_t(16)})
+    for (size_t dim : {size_t(16), size_t(17), size_t(32), size_t(48), size_t(64), size_t(128)}) {
         constexpr size_t length = 65, kvheads = 2;
         size_t heads = groups * kvheads;
         std::vector<float> q(heads * dim), k(length * kvheads * dim), v(k.size()), expected(q.size()), actual(q.size()), first;
@@ -660,27 +748,33 @@ void attention_edge_tests() {
             }
         }
     }
-    for (size_t dim : {size_t(16), size_t(17)}) {
-        constexpr size_t length = 65;
+    for (size_t dim : {size_t(16), size_t(17), size_t(32), size_t(48), size_t(64), size_t(128)})
+    for (size_t length : {size_t(65), size_t(79), size_t(129)}) {
+        size_t key_blocks = (length + 63) / 64;
         std::vector<float> q(dim), k(length * dim), v(k.size(), 1), expected(dim), actual(dim);
         q[0] = q[1] = std::numeric_limits<float>::max();
         for (size_t t = 0; t < 64; ++t) k[t * dim] = k[t * dim + 1] = -1;
         std::fill(v.begin() + 64 * dim, v.end(), 5);
         k = transpose_keys(k.data(), length, 1, dim);
         decode::ThreadPool pool(2); decode::AttentionWorkspace reference(129, 1, dim), workspace(129, 1, dim);
-        decode::attention(q.data(), k.data(), v.data(), decode::CacheType::f32, expected.data(), length, 1, 1, dim, 2, pool, reference, true);
-        decode::attention(q.data(), k.data(), v.data(), decode::CacheType::f32, actual.data(), length, 1, 1, dim, 2, pool, workspace);
+        decode::attention(q.data(), k.data(), v.data(), decode::CacheType::f32, expected.data(), length, 1, 1, dim, key_blocks, pool, reference, true);
+        decode::attention(q.data(), k.data(), v.data(), decode::CacheType::f32, actual.data(), length, 1, 1, dim, key_blocks, pool, workspace);
         for (size_t j = 0; j < dim; ++j) near(actual[j], expected[j], 1e-6, "zero-mass negative-infinity block");
         k[0] = std::numeric_limits<float>::quiet_NaN();
-        decode::attention(q.data(), k.data(), v.data(), decode::CacheType::f32, actual.data(), length, 1, 1, dim, 2, pool, workspace);
+        decode::attention(q.data(), k.data(), v.data(), decode::CacheType::f32, actual.data(), length, 1, 1, dim, key_blocks, pool, workspace);
         for (float value : actual) require(std::isnan(value), "NaN score is not suppressed by neutral-block handling");
         std::fill(q.begin(), q.end(), 0); std::fill(k.begin(), k.end(), 0);
         float large = std::numeric_limits<float>::max() / 2;
-        std::fill(v.begin(), v.end(), large);
-        decode::attention(q.data(), k.data(), v.data(), decode::CacheType::f32, expected.data(), length, 1, 1, dim, 2, pool, reference, true);
-        decode::attention(q.data(), k.data(), v.data(), decode::CacheType::f32, actual.data(), length, 1, 1, dim, 2, pool, workspace);
+        for (size_t t = 0; t < length; ++t) for (size_t j = 0; j < dim; ++j)
+            v[t * dim + j] = j % 3 == 0 ? large : j % 3 == 1 ? -large : (t / 64 % 2 ? -large : large);
+        decode::attention(q.data(), k.data(), v.data(), decode::CacheType::f32, expected.data(), length, 1, 1, dim, key_blocks, pool, reference, true);
+        decode::attention(q.data(), k.data(), v.data(), decode::CacheType::f32, actual.data(), length, 1, 1, dim, key_blocks, pool, workspace);
         for (size_t j = 0; j < dim; ++j) near(actual[j] / large, expected[j] / large, 3e-6, "finite weighted average does not overflow");
     }
+    quantized_attention_tail_tests();
+#if defined(__x86_64__) || defined(__i386__)
+    attention_order_tests();
+#endif
 }
 void optimized_tests(const fs::path& root) {
     for (uint32_t bits = 0; bits < 65536; ++bits) {

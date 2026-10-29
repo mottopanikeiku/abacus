@@ -74,23 +74,32 @@ static float dot_scalar(const Matrix& m, size_t row, const float* x) {
     }
     return sum;
 }
+// A fixed column count lets the compiler keep independent token accumulators
+// in registers while sharing each decoded weight load. One-column tiles use
+// the step kernel rather than a separate batched arithmetic implementation.
+template<size_t Columns>
 static void batch_dot_scalar(const Matrix& m, size_t row, const float* x, size_t stride,
-                             size_t columns, const Activation*, float* result) {
-    std::fill_n(result, columns, 0.0f);
+                             const Activation*, float* result) {
+    if constexpr (Columns == 1) { result[0] = dot_scalar(m, row, x); return; }
+    float sums[Columns]{};
     if (m.dtype == DType::i8 && m.group_size) {
         for (size_t begin = 0; begin < m.cols; begin += m.group_size) {
             float scale = matrix_scale(m, row, begin);
             for (size_t j = begin; j < begin + m.group_size; ++j) {
                 float w = value(m, row * m.cols + j) * scale;
-                for (size_t c = 0; c < columns; ++c) result[c] += w * x[c * stride + j];
+                for (size_t c = 0; c < Columns; ++c) sums[c] += w * x[c * stride + j];
             }
         }
     } else for (size_t j = 0; j < m.cols; ++j) {
         float w = value(m, row * m.cols + j);
-        for (size_t c = 0; c < columns; ++c) result[c] += w * x[c * stride + j];
+        for (size_t c = 0; c < Columns; ++c) sums[c] += w * x[c * stride + j];
     }
-    if (m.dtype == DType::i8 && !m.group_size)
-        for (size_t c = 0; c < columns; ++c) result[c] *= matrix_scale(m, row, 0);
+    if (m.dtype == DType::i8 && !m.group_size) {
+        float scale = matrix_scale(m, row, 0);
+        for (size_t c = 0; c < Columns; ++c) result[c] = sums[c] * scale;
+    } else {
+        for (size_t c = 0; c < Columns; ++c) result[c] = sums[c];
+    }
 }
 #ifdef DECODE_X86
 __attribute__((target("avx2,f16c"), always_inline))
@@ -259,12 +268,13 @@ static float dot_vnni16(const Matrix& m, size_t row, const Activation& x) {
     }
     return _mm512_reduce_add_ps(sum);
 }
-template<bool Grouped>
+template<size_t Columns, bool Grouped>
 __attribute__((target("avx2,f16c,fma"), noinline))
 static void batch_dot256(const Matrix& m, size_t row, const float* x, size_t stride,
-                         size_t columns, const Activation*, float* result) {
-    __m256 sums[projection_columns];
-    for (size_t c = 0; c < columns; ++c) sums[c] = _mm256_setzero_ps();
+                         const Activation*, float* result) {
+    if constexpr (Columns == 1) { result[0] = dot256_impl<Grouped>(m, row, x); return; }
+    __m256 sums[Columns];
+    for (size_t c = 0; c < Columns; ++c) sums[c] = _mm256_setzero_ps();
     size_t j = 0, start = row * m.cols;
     unsigned shift = Grouped ? unsigned(__builtin_ctzll(m.group_size)) : 0;
     for (; j + 8 <= m.cols; j += 8) {
@@ -277,10 +287,10 @@ static void batch_dot256(const Matrix& m, size_t row, const float* x, size_t str
             w = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(bits));
             if constexpr (Grouped) w = _mm256_mul_ps(w, _mm256_set1_ps(scale_fast(m, row, j, shift)));
         } else w = _mm256_loadu_ps(static_cast<const float*>(m.data) + start + j);
-        for (size_t c = 0; c < columns; ++c)
+        for (size_t c = 0; c < Columns; ++c)
             sums[c] = _mm256_fmadd_ps(w, _mm256_loadu_ps(x + c * stride + j), sums[c]);
     }
-    for (size_t c = 0; c < columns; ++c) {
+    for (size_t c = 0; c < Columns; ++c) {
         alignas(32) float lanes[8]; _mm256_store_ps(lanes, sums[c]);
         float total = 0; for (float lane : lanes) total += lane;
         for (size_t t = j; t < m.cols; ++t)
@@ -288,12 +298,17 @@ static void batch_dot256(const Matrix& m, size_t row, const float* x, size_t str
         result[c] = m.dtype == DType::i8 && !Grouped ? total * row_scale_fast(m, row) : total;
     }
 }
-template<bool Grouped, bool Four>
+template<size_t Columns, bool Grouped, bool Four>
 __attribute__((target("avx512f,avx512bw,f16c"), noinline))
 static void batch_dot512(const Matrix& m, size_t row, const float* x, size_t stride,
-                         size_t columns, const Activation*, float* result) {
-    __m512 a[projection_columns], b[projection_columns], csum[projection_columns], d[projection_columns];
-    for (size_t c = 0; c < columns; ++c) {
+                         const Activation*, float* result) {
+    if constexpr (Columns == 1) {
+        if constexpr (Four) result[0] = dot512x4_impl<Grouped>(m, row, x);
+        else result[0] = dot512_impl<Grouped>(m, row, x);
+        return;
+    }
+    __m512 a[Columns], b[Columns], csum[Columns], d[Columns];
+    for (size_t c = 0; c < Columns; ++c) {
         a[c] = _mm512_setzero_ps();
         if constexpr (Four) b[c] = csum[c] = d[c] = a[c];
     }
@@ -313,7 +328,7 @@ static void batch_dot512(const Matrix& m, size_t row, const float* x, size_t str
                     w2 = _mm512_mul_ps(w2, second); w3 = _mm512_mul_ps(w3, second);
                 }
             }
-            for (size_t c = 0; c < columns; ++c) {
+            for (size_t c = 0; c < Columns; ++c) {
                 const float* input = x + c * stride + j;
                 a[c] = _mm512_fmadd_ps(w0, _mm512_loadu_ps(input), a[c]);
                 b[c] = _mm512_fmadd_ps(w1, _mm512_loadu_ps(input + 16), b[c]);
@@ -324,10 +339,10 @@ static void batch_dot512(const Matrix& m, size_t row, const float* x, size_t str
     }
     for (; j + 16 <= m.cols; j += 16) {
         __m512 w = load512<Grouped>(m, start + j, row, j, shift);
-        for (size_t c = 0; c < columns; ++c)
+        for (size_t c = 0; c < Columns; ++c)
             a[c] = _mm512_fmadd_ps(w, _mm512_loadu_ps(x + c * stride + j), a[c]);
     }
-    for (size_t c = 0; c < columns; ++c) {
+    for (size_t c = 0; c < Columns; ++c) {
         float total;
         if constexpr (Four) total = _mm512_reduce_add_ps(_mm512_add_ps(_mm512_add_ps(a[c], b[c]), _mm512_add_ps(csum[c], d[c])));
         else total = _mm512_reduce_add_ps(a[c]);
@@ -336,10 +351,12 @@ static void batch_dot512(const Matrix& m, size_t row, const float* x, size_t str
         result[c] = m.dtype == DType::i8 && !Grouped ? total * row_scale_fast(m, row) : total;
     }
 }
+template<size_t Columns>
 __attribute__((target("avx512vnni,avx512vl,avx512bw,avx2,f16c")))
 static void batch_dot_vnni(const Matrix& m, size_t row, const float*, size_t,
-                           size_t columns, const Activation* x, float* result) {
-    std::fill_n(result, columns, 0.0f);
+                           const Activation* x, float* result) {
+    if constexpr (Columns == 1) { result[0] = dot_vnni(m, row, x[0]); return; }
+    float sums[Columns]{};
     unsigned shift = m.group_size ? unsigned(__builtin_ctzll(m.group_size)) : 0;
     const auto* weights = static_cast<const int8_t*>(m.data) + row * m.cols;
     const __m256i correction = _mm256_set1_epi8(char(0x80));
@@ -347,35 +364,38 @@ static void batch_dot_vnni(const Matrix& m, size_t row, const float*, size_t,
         auto w = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(weights + j));
         auto offset = _mm256_dpbusd_epi32(_mm256_setzero_si256(), correction, w);
         float ws = scale_fast(m, row, j, shift);
-        for (size_t c = 0; c < columns; ++c) {
+        for (size_t c = 0; c < Columns; ++c) {
             auto a = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(x[c].bytes.data() + j));
             auto dot = _mm256_sub_epi32(_mm256_dpbusd_epi32(_mm256_setzero_si256(), a, w), offset);
             auto sum = _mm_add_epi32(_mm256_castsi256_si128(dot), _mm256_extracti128_si256(dot, 1));
             sum = _mm_add_epi32(sum, _mm_shuffle_epi32(sum, 0x4e));
             sum = _mm_add_epi32(sum, _mm_shuffle_epi32(sum, 0xb1));
-            result[c] += float(_mm_cvtsi128_si32(sum)) * (x[c].scales[j / 32] * ws);
+            sums[c] += float(_mm_cvtsi128_si32(sum)) * (x[c].scales[j / 32] * ws);
         }
     }
+    for (size_t c = 0; c < Columns; ++c) result[c] = sums[c];
 }
+template<size_t Columns>
 __attribute__((target("avx512f,avx512vnni,avx512bw,avx2,f16c"), noinline))
 static void batch_dot_vnni16(const Matrix& m, size_t row, const float*, size_t,
-                             size_t columns, const Activation* x, float* result) {
+                             const Activation* x, float* result) {
+    if constexpr (Columns == 1) { result[0] = dot_vnni16(m, row, x[0]); return; }
     const auto* weights = static_cast<const int8_t*>(m.data) + row * m.cols;
     unsigned shift = m.group_size ? unsigned(__builtin_ctzll(m.group_size)) : 0;
-    __m512 sums[projection_columns];
-    bool wide[projection_columns]{};
-    for (size_t c = 0; c < columns; ++c) sums[c] = _mm512_setzero_ps();
+    __m512 sums[Columns];
+    bool wide[Columns]{};
+    for (size_t c = 0; c < Columns; ++c) sums[c] = _mm512_setzero_ps();
     for (size_t begin = 0; begin < m.cols;) {
         size_t width = std::min(m.group_size == 32 ? size_t(32) : size_t(64), m.cols - begin);
-        __m512i dots[projection_columns];
-        for (size_t c = 0; c < columns; ++c) dots[c] = _mm512_setzero_si512();
+        __m512i dots[Columns];
+        for (size_t c = 0; c < Columns; ++c) dots[c] = _mm512_setzero_si512();
         size_t j = 0;
         for (; j + 32 <= width; j += 32) {
             auto w = _mm512_cvtepi8_epi16(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(weights + begin + j)));
-            for (size_t c = 0; c < columns; ++c)
+            for (size_t c = 0; c < Columns; ++c)
                 dots[c] = _mm512_dpwssd_epi32(dots[c], w, _mm512_loadu_si512(static_cast<const void*>(x[c].words.data() + begin + j)));
         }
-        if (j < width) for (size_t c = 0; c < columns; ++c) {
+        if (j < width) for (size_t c = 0; c < Columns; ++c) {
             alignas(64) int32_t lanes[16]; _mm512_store_si512(static_cast<void*>(lanes), dots[c]);
             for (size_t t = j; t < width; ++t)
                 lanes[(t % 32) / 2] += int32_t(weights[begin + t]) * int32_t(x[c].words[begin + t]);
@@ -384,14 +404,14 @@ static void batch_dot_vnni16(const Matrix& m, size_t row, const float*, size_t,
         float ws = scale_fast(m, row, begin, shift);
         constexpr float maximum = float(double(std::numeric_limits<float>::max()) /
             (double(std::numeric_limits<size_t>::max()) * 128.0 * 32767.0 * 2.0));
-        for (size_t c = 0; c < columns; ++c) {
+        for (size_t c = 0; c < Columns; ++c) {
             float scale = ws * x[c].scales[begin / 64];
             if (!std::isnormal(scale) || scale > maximum) wide[c] = true;
             if (!wide[c]) sums[c] = _mm512_fmadd_ps(_mm512_cvtepi32_ps(dots[c]), _mm512_set1_ps(scale), sums[c]);
         }
         begin += width;
     }
-    for (size_t c = 0; c < columns; ++c)
+    for (size_t c = 0; c < Columns; ++c)
         result[c] = wide[c] ? dot_vnni16_wide(m, row, x[c]) : _mm512_reduce_add_ps(sums[c]);
 }
 #endif
@@ -524,47 +544,42 @@ void projections(const Projection* items, size_t count, const float* x, Kernel k
         }
     }, &work);
 }
-using BatchDot = void (*)(const Matrix&, size_t, const float*, size_t, size_t, const Activation*, float*);
+using BatchDot = void (*)(const Matrix&, size_t, const float*, size_t, const Activation*, float*);
+template<size_t Columns>
 static BatchDot batch_dot(Kernel kernel, const Matrix& matrix) {
     (void)kernel; (void)matrix;
 #ifdef DECODE_X86
     bool grouped = matrix.group_size != 0;
-    if (kernel == Kernel::simd256) return grouped ? batch_dot256<true> : batch_dot256<false>;
-    if (kernel == Kernel::simd512) return grouped ? batch_dot512<true, false> : batch_dot512<false, false>;
-    if (kernel == Kernel::simd512x4) return grouped ? batch_dot512<true, true> : batch_dot512<false, true>;
-    if (kernel == Kernel::vnni) return batch_dot_vnni;
-    if (kernel == Kernel::vnni16) return batch_dot_vnni16;
+    if (kernel == Kernel::simd256) return grouped ? batch_dot256<Columns, true> : batch_dot256<Columns, false>;
+    if (kernel == Kernel::simd512) return grouped ? batch_dot512<Columns, true, false> : batch_dot512<Columns, false, false>;
+    if (kernel == Kernel::simd512x4) return grouped ? batch_dot512<Columns, true, true> : batch_dot512<Columns, false, true>;
+    if (kernel == Kernel::vnni) return batch_dot_vnni<Columns>;
+    if (kernel == Kernel::vnni16) return batch_dot_vnni16<Columns>;
 #endif
-    return batch_dot_scalar;
+    return batch_dot_scalar<Columns>;
 }
-void batch_projections(const BatchProjection* items, size_t count, const float* x,
-                       size_t columns, size_t input_stride, Kernel kernel,
-                       ThreadPool& pool, Activation* activations, bool swiglu) {
-    if (!columns || columns > projection_columns || !activations)
-        throw std::runtime_error("invalid projection column count");
-    size_t tasks = validate_projections(items, count, x, kernel, swiglu);
-    if (input_stride < items[0].matrix->cols) throw std::runtime_error("invalid input stride");
-    for (size_t i = 0; i < count; ++i)
-        if (!(swiglu && i == 1) && items[i].output_stride < items[i].matrix->rows)
-            throw std::runtime_error("invalid output stride");
-    for (size_t c = 0; c < columns; ++c)
+template<size_t Columns>
+static void batch_projections_impl(const BatchProjection* items, size_t count, const float* x,
+                                   size_t input_stride, Kernel kernel, ThreadPool& pool,
+                                   Activation* activations, size_t tasks, bool swiglu) {
+    for (size_t c = 0; c < Columns; ++c)
         prepare_activation(x + c * input_stride, items[0].matrix->cols, kernel, activations[c]);
     struct Work {
         const BatchProjection* items; size_t count;
-        const float* x; size_t stride, columns;
+        const float* x; size_t stride;
         const Activation* activations; Kernel kernel; bool swiglu;
-    } work{items, count, x, input_stride, columns, activations, kernel, swiglu};
+    } work{items, count, x, input_stride, activations, kernel, swiglu};
     pool.run(tasks, [](void* ptr, size_t task) noexcept {
         const auto& w = *static_cast<Work*>(ptr);
         if (w.swiglu) {
             size_t end = std::min(w.items[0].matrix->rows, (task + 1) * 64);
-            BatchDot gate_dot = batch_dot(w.kernel, *w.items[0].matrix);
-            BatchDot up_dot = batch_dot(w.kernel, *w.items[1].matrix);
+            BatchDot gate_dot = batch_dot<Columns>(w.kernel, *w.items[0].matrix);
+            BatchDot up_dot = batch_dot<Columns>(w.kernel, *w.items[1].matrix);
             for (size_t row = task * 64; row < end; ++row) {
-                float gate[projection_columns], up[projection_columns];
-                gate_dot(*w.items[0].matrix, row, w.x, w.stride, w.columns, w.activations, gate);
-                up_dot(*w.items[1].matrix, row, w.x, w.stride, w.columns, w.activations, up);
-                for (size_t c = 0; c < w.columns; ++c)
+                float gate[Columns], up[Columns];
+                gate_dot(*w.items[0].matrix, row, w.x, w.stride, w.activations, gate);
+                up_dot(*w.items[1].matrix, row, w.x, w.stride, w.activations, up);
+                for (size_t c = 0; c < Columns; ++c)
                     w.items[0].output[c * w.items[0].output_stride + row] = (gate[c] / (1 + std::exp(-gate[c]))) * up[c];
             }
             return;
@@ -574,16 +589,35 @@ void batch_projections(const BatchProjection* items, size_t count, const float* 
             size_t blocks = (item.matrix->rows + 63) / 64;
             if (task >= blocks) { task -= blocks; continue; }
             size_t end = std::min(item.matrix->rows, (task + 1) * 64);
-            BatchDot dot = batch_dot(w.kernel, *item.matrix);
+            BatchDot dot = batch_dot<Columns>(w.kernel, *item.matrix);
             for (size_t row = task * 64; row < end; ++row) {
-                float result[projection_columns];
-                dot(*item.matrix, row, w.x, w.stride, w.columns, w.activations, result);
-                for (size_t c = 0; c < w.columns; ++c)
+                float result[Columns];
+                dot(*item.matrix, row, w.x, w.stride, w.activations, result);
+                for (size_t c = 0; c < Columns; ++c)
                     item.output[c * item.output_stride + row] = result[c] + (item.bias ? item.bias[row] : 0);
             }
             return;
         }
     }, &work);
+}
+void batch_projections(const BatchProjection* items, size_t count, const float* x,
+                       size_t columns, size_t input_stride, Kernel kernel,
+                       ThreadPool& pool, Activation* activations, bool swiglu) {
+    static_assert(projection_columns == 4, "update the column dispatch for a different tile size");
+    if (!columns || columns > projection_columns || !activations)
+        throw std::runtime_error("invalid projection column count");
+    size_t tasks = validate_projections(items, count, x, kernel, swiglu);
+    if (input_stride < items[0].matrix->cols) throw std::runtime_error("invalid input stride");
+    for (size_t i = 0; i < count; ++i)
+        if (!(swiglu && i == 1) && items[i].output_stride < items[i].matrix->rows)
+            throw std::runtime_error("invalid output stride");
+    // Resolve tile width before scheduling rows, not in the weight traversal.
+    switch (columns) {
+        case 1: return batch_projections_impl<1>(items, count, x, input_stride, kernel, pool, activations, tasks, swiglu);
+        case 2: return batch_projections_impl<2>(items, count, x, input_stride, kernel, pool, activations, tasks, swiglu);
+        case 3: return batch_projections_impl<3>(items, count, x, input_stride, kernel, pool, activations, tasks, swiglu);
+        case 4: return batch_projections_impl<4>(items, count, x, input_stride, kernel, pool, activations, tasks, swiglu);
+    }
 }
 void matvec(const Matrix& m, const float* x, float* y, Kernel kernel, ThreadPool& pool) {
     // Standalone kernel tests; the engine owns and reuses its activation buffers.
