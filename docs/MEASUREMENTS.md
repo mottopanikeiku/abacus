@@ -1,5 +1,27 @@
 # Measurement protocol
 
+## CPU demo
+
+`make demo` builds the native engine and downloads the pinned
+Qwen2.5-0.5B-Instruct snapshot with `tools.download_model`. It then makes one
+g64f16 artifact in `external/g64f16` with `tools.quantize` and answers `PROMPT`
+through the snapshot's own chat template, on two threads. It builds no llama.cpp
+and runs no calibration, cloud job or timing. Later runs reuse the artifact once
+`tools.quantize` has checked it against its recorded hashes.
+
+```sh
+make demo PROMPT='Why is CPU decoding often memory-bound?' DEMO_OPTIONS='--steps 48'
+```
+
+`KERNEL` selects the arithmetic. The default `simd512x4` needs AVX-512; use
+`KERNEL=simd256` (AVX2) or `KERNEL=scalar` elsewhere. `DEMO_OPTIONS` passes
+other wrapper flags such as `--steps` or `--stats`, and `MODEL` and `DEMO_MODEL`
+override the snapshot and artifact paths. Generation stops at the model's
+end-of-turn token or after `--steps` tokens (32 by default), whichever comes
+first. Only the decoded answer is printed. `DEMO_OPTIONS=--stats` also writes the
+token IDs and engine settings to stderr. Qwen's chat template adds its default
+system prompt. The demo is not a timing or quality measurement.
+
 ## Generation boundaries
 
 The text wrapper uses the local snapshot's actual chat template and configured
