@@ -125,32 +125,42 @@ def load_manifest(path: Path) -> dict:
     return data
 
 
+def check_tokenizer(model: Path, data: dict, directory: Path) -> None:
+    """Require the pinned tokenizer files, then re-derive every window from its excerpt text."""
+    from transformers import AutoTokenizer
+
+    # Tokenizer-only verification avoids loading model weights during preparation.
+    for name in ("tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt"):
+        size, algorithm, expected = FILES[name]
+        path = model / name
+        if not path.is_file():
+            raise ValueError(f"Pinned tokenizer file missing: {name}")
+        if path.stat().st_size != size or file_hash(path, algorithm) != expected:
+            raise ValueError("Pinned tokenizer checksum mismatch")
+    tokenizer = AutoTokenizer.from_pretrained(str(model), local_files_only=True, trust_remote_code=False, use_fast=True)
+    for split, stored in data["sources"].items():
+        excerpt = (directory / stored["excerpt"]).read_text(encoding="utf-8")
+        tokens = [token for window in data["windows"] if window["split"] == split for token in window["tokens"]]
+        if tokenizer.encode(excerpt, add_special_tokens=False) != tokens:
+            raise ValueError("Committed excerpt no longer tokenizes to the pinned windows")
+
+
 def prepare(model: Path | None, output_dir: Path) -> dict:
     """Copy the hash-pinned committed corpus; with a pinned tokenizer, also re-derive its windows.
 
-    Needs no network. The excerpt text must tokenize back to exactly the committed token windows.
+    Needs no network. The excerpt text must tokenize back to exactly the committed token windows,
+    including when an existing corpus is reused.
     """
     protect_destination(output_dir)
     destination = output_dir / "corpus.json"
-    if destination.exists():
-        return load_manifest(destination)
-    committed = load_manifest(COMMITTED / "corpus.json")
+    source = output_dir if destination.exists() else COMMITTED
+    data = load_manifest(source / "corpus.json")
     if model is not None:
-        from transformers import AutoTokenizer
-
-        # Tokenizer-only verification avoids loading model weights during preparation.
-        for name in ("tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt"):
-            size, algorithm, expected = FILES[name]
-            if (model / name).stat().st_size != size or file_hash(model / name, algorithm) != expected:
-                raise ValueError("Pinned tokenizer checksum mismatch")
-        tokenizer = AutoTokenizer.from_pretrained(str(model), local_files_only=True, trust_remote_code=False, use_fast=True)
-        for split, stored in committed["sources"].items():
-            excerpt = (COMMITTED / stored["excerpt"]).read_text(encoding="utf-8")
-            tokens = [token for window in committed["windows"] if window["split"] == split for token in window["tokens"]]
-            if tokenizer.encode(excerpt, add_special_tokens=False) != tokens:
-                raise ValueError("Committed excerpt no longer tokenizes to the pinned windows")
+        check_tokenizer(model, data, source)
+    if source == output_dir:
+        return data
     output_dir.mkdir(parents=True, exist_ok=True)
-    for stored in committed["sources"].values():
+    for stored in data["sources"].values():
         excerpt = output_dir / stored["excerpt"]
         protect_destination(excerpt)
         if excerpt.resolve() != (COMMITTED / stored["excerpt"]).resolve():

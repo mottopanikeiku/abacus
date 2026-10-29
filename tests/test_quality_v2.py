@@ -179,13 +179,33 @@ def test_prepare_rejects_a_changed_committed_excerpt(tmp_path, monkeypatch):
     assert not (tmp_path / "output" / "corpus.json").exists()
 
 
+@pytest.mark.parametrize("output", ["committed", "reused"])
+@pytest.mark.parametrize("tokenizer", ["missing", "changed"])
+def test_prepare_checks_a_supplied_tokenizer_before_reusing_a_corpus(tmp_path, monkeypatch, output, tokenizer):
+    refuse_network(monkeypatch)
+    if output == "committed":
+        directory = CORPUS.parent
+    else:
+        directory = tmp_path / "cached"
+        prepare(None, directory)
+    model = tmp_path / "tokenizer"
+    model.mkdir()
+    if tokenizer == "changed":
+        for name in ("tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt"):
+            (model / name).write_text("{}")
+    with pytest.raises(ValueError, match="missing" if tokenizer == "missing" else "checksum mismatch"):
+        prepare(model, directory)
+
+
 def test_prepare_retokenizes_committed_excerpts_with_the_pinned_tokenizer(tmp_path, monkeypatch):
     model = os.environ.get("CPU_DECODE_MODEL")
     if not model:
         pytest.skip("Set CPU_DECODE_MODEL to re-tokenize the committed excerpts with the pinned tokenizer")
     refuse_network(monkeypatch)
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
-    assert prepare(Path(model), tmp_path / "fresh") == load_manifest(CORPUS)
+    # Fresh copy, reuse of that copy and the committed directory all re-tokenize.
+    for directory in (tmp_path / "fresh", tmp_path / "fresh", CORPUS.parent):
+        assert prepare(Path(model), directory) == load_manifest(CORPUS)
 
 
 def test_manifest_pin_prevents_rehashing_altered_tokens(tmp_path):
