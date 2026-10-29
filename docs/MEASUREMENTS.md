@@ -63,7 +63,10 @@ F16 KV. The [complete table](../results/v2/cloud-vnni/final/table.csv)
 contains 192 timed observations and 24,576 full forwards. Native's median
 paired throughput ratios range from **1.0898× to 1.5306×**; all six
 individual 95% ABBA-bootstrap intervals are above one. They are not
-simultaneous intervals or a claim about other hosts.
+simultaneous intervals or a claim about other hosts. The README's
+[figure](../results/v2/cloud-vnni/ratios.svg) plots every pair, median and
+interval from the committed summary; `uv run python -m tools.figure_cloud`
+regenerates it without running either engine.
 
 The [separate runtime pilot](../results/v2/cloud-vnni/runtime-pilot/raw.json)
 is excluded. Three final startup candidates were rejected for missing

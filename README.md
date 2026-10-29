@@ -4,7 +4,13 @@
 **v2 result:** My pinned VNNI/int16 decoder beat llama.cpp Q8_0 in **all six pre-specified cloud cells**, at **1.090–1.531× paired throughput**. This is **one virtual host with worker-lifetime CPU binding**, not unchanged laptop CLI performance. My selected weights improve KL agreement but slightly worsen perplexity.
 <!-- FINAL_RESULT_END -->
 
-I wrote the C++ [decoder](src/model.cpp), [kernels](src/kernels.cpp) and [attention](src/attention.cpp) from scratch; weights are memory-mapped. The cloud result quantizes activations to signed int16 for AVX-512 VNNI integer dot products. The default `simd512x4` kernel instead widens int8 weights and multiplies them with FP32 arithmetic.
+![Native/llama.cpp paired ratios on one cloud host](results/v2/cloud-vnni/ratios.svg)
+
+I wrote the C++ [decoder](src/model.cpp), [kernels](src/kernels.cpp) and [attention](src/attention.cpp) from scratch; weights are memory-mapped. The cloud result uses signed-int16 activations with AVX-512 VNNI dot products; the default `simd512x4` kernel widens int8 weights into FP32 arithmetic. CPU-only checks (Linux x86-64, C++17/OpenMP, CMake, uv; no model download):
+
+```sh
+make build && ctest --test-dir build && uv run pytest -q tests
+```
 
 ## v2 quality
 
@@ -60,7 +66,7 @@ Host load, clocks and NUMA are uncontrolled; I have no cloud read-bandwidth ceil
 
 ## Reproduce and attribution
 
-Linux x86-64, C++17/OpenMP, CMake and uv. [Methods](docs/MEASUREMENTS.md) cover pinned downloads, numerical checks, cloud execution and v3 reproduction; [baseline differences](docs/BASELINE.md) explain each comparison. Abacus was called cpu-decode: the `cpu-decode` binary, result schemas, Modal resource names and committed evidence keep that historical name.
+[Methods](docs/MEASUREMENTS.md) cover pinned downloads, numerical checks, cloud execution and v3 reproduction; [BASELINE](docs/BASELINE.md) separates each comparison. Formerly cpu-decode: the binary, schemas, Modal names and committed evidence keep that name.
 
 [Qwen](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct) weights: Apache-2.0; my decoder: MIT. [Transformers](https://github.com/huggingface/transformers): oracle. [llama.cpp](https://github.com/ggml-org/llama.cpp): baseline. [Prompt-lookup attribution](https://github.com/apoorvumang/prompt-lookup-decoding) and [prior work](docs/PRIOR_WORK.md).
 
