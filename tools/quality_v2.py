@@ -1044,10 +1044,9 @@ def compare(args) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="stage", required=True)
-    preparation = commands.add_parser("prepare", help="Fix attributed source/text/token selection before measurements")
-    preparation.add_argument("--model", type=Path, required=True)
+    preparation = commands.add_parser("prepare", help="Copy the hash-pinned corpus and excerpts; no network")
+    preparation.add_argument("--model", type=Path, help="Pinned snapshot; when given, also re-tokenize the committed excerpts")
     preparation.add_argument("--output-dir", type=Path, default=Path("results/v2"))
-    preparation.add_argument("--raw-dir", type=Path, default=Path("external/quality-v2/sources"))
     reference = commands.add_parser("oracle", help="BF16 storage/FP32 arithmetic Transformers, streaming whole-vocabulary projection")
     reference.add_argument("--model", type=Path, required=True)
     reference.add_argument("--streamed-oracle", action="store_true", help="One FP32 layer at a time; required for 1.5B")
@@ -1096,7 +1095,7 @@ def main() -> None:
     if hasattr(args, "threads") and args.threads < 1 or hasattr(args, "head_chunk") and args.head_chunk < 1:
         parser.error("threads and head-chunk must be positive")
     if args.stage == "prepare":
-        prepare(args.model, args.output_dir, args.raw_dir)
+        prepare(args.model, args.output_dir)
         print(json.dumps({"corpus_sha256": file_hash(args.output_dir / "corpus.json")}))
     elif args.stage == "oracle":
         oracle(args)
