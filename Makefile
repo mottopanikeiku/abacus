@@ -34,12 +34,26 @@ FINAL_WRAPPER ?=
 export FINAL_WRAPPER
 FINAL_OPTIONS ?=
 
+# The demo prepares one weight format; it builds no llama.cpp and runs no calibration or timing.
+DEMO_MODEL ?= $(CACHE)/g64f16
+PROMPT ?= Explain in one sentence why CPU decoding can be memory-bandwidth limited.
+DEMO_OPTIONS ?=
+export PROMPT
+
 .PHONY: build prepare oracle calibration quality final test model-test
 
 build:
 	$(RUN) uv sync --locked
 	$(RUN) cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCPU_DECODE_NATIVE=ON
 	$(RUN) cmake --build build -j4
+
+.PHONY: demo-prepare demo
+demo-prepare: build
+	$(RUN) uv run python -m tools.download_model --output "$(CACHE)/demo-source.json"
+	$(RUN) uv run python -m tools.quantize --source "$(MODEL)" --output "$(DEMO_MODEL)" --group-size 64 --scale-dtype f16 --manifest "$(CACHE)/demo-quantized.json"
+
+demo: demo-prepare
+	$(RUN) uv run python -m tools.generate --model "$(DEMO_MODEL)" --tokenizer "$(MODEL)" --prompt "$$PROMPT" --chat --threads 2 --kernel "$(KERNEL)" $(DEMO_OPTIONS)
 
 prepare: build
 	$(RUN) uv run python -m tools.download_model --output $(RESULTS)/model-manifest.json

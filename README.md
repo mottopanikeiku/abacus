@@ -6,10 +6,11 @@
 
 ![Native/llama.cpp paired ratios on one cloud host](results/v2/cloud-vnni/ratios.svg)
 
-I wrote the C++ [decoder](src/model.cpp), [kernels](src/kernels.cpp) and [attention](src/attention.cpp) from scratch; weights are memory-mapped. The cloud result uses signed-int16 activations with AVX-512 VNNI dot products; the default `simd512x4` kernel widens int8 weights into FP32 arithmetic. CPU-only checks (Linux x86-64, C++17/OpenMP, CMake, uv; no model download):
+I wrote the C++ [decoder](src/model.cpp), [kernels](src/kernels.cpp) and [attention](src/attention.cpp) from scratch; weights are memory-mapped. The cloud result uses signed-int16 activations with AVX-512 VNNI dot products; the default `simd512x4` kernel widens int8 weights into FP32 arithmetic. CPU-only checks, then a [demo](docs/MEASUREMENTS.md#cpu-demo) fetching the pinned model (Linux x86-64, C++17/OpenMP, CMake, uv):
 
 ```sh
 make build && ctest --test-dir build && uv run pytest -q tests
+make demo
 ```
 
 ## v2 quality
@@ -38,9 +39,9 @@ The host is an **AMD Zen 4 EPYC**, inferred from [CPUID family 25/model 17](http
 
 I retained sixteen 128-forward pairs per cell in eight ABBA quartets. Both engines prefill the same seed IDs, then decode their own greedy tokens. The clock includes LM head/argmax and the final consumed token; load, prefill, warmup and rewind are excluded. Paired medians are not ratios of displayed medians. I bootstrap quartets 20,000 times: per-cell, not simultaneous intervals. Runtime and flash-selection pilots are excluded.
 
-Native holds public `CpuBinding` for its worker lifetime; idle engines are paused outside clocks. llama.cpp selects flash ON/OFF/AUTO by pilot, uses poll50 and enables repacking; no repacked buffer was selected. [Raw samples](results/v2/cloud-vnni/final/raw.json), [spreads](results/v2/cloud-vnni/final/summary.json) and [methods](docs/MEASUREMENTS.md) retain provenance and failed work. [Estimated total cost](results/v2/cloud-vnni/run-cost.json): **$1.6074**, not an invoice.
+Native holds public `CpuBinding` for its worker lifetime; idle engines are paused outside clocks. llama.cpp selects flash ON/OFF/AUTO by pilot, uses poll50 and enables repacking; no repacked buffer was selected. [Raw samples](results/v2/cloud-vnni/final/raw.json), [spreads](results/v2/cloud-vnni/final/summary.json) and [methods](docs/MEASUREMENTS.md) keep provenance and failures. [Estimated total cost](results/v2/cloud-vnni/run-cost.json): **$1.6074**, not an invoice.
 
-My separate [earlier AVX2/FP32 run](results/v2/cloud/summary.json) completed only 2/6 cells and lost both, at 0.4108× and 0.3079×. Different hosts do not establish a causal VNNI speedup.
+An [earlier AVX2/FP32 run](results/v2/cloud/summary.json) completed only 2/6 cells and lost both, at 0.4108× and 0.3079×. Different hosts do not establish a causal VNNI speedup.
 
 ## v3: exact lookup and smaller KV
 
@@ -66,7 +67,7 @@ Host load, clocks and NUMA are uncontrolled; I have no cloud read-bandwidth ceil
 
 ## Reproduce and attribution
 
-[Methods](docs/MEASUREMENTS.md) cover pinned downloads, numerical checks, cloud execution and v3 reproduction; [BASELINE](docs/BASELINE.md) separates each comparison. Formerly cpu-decode: the binary, schemas, Modal names and committed evidence keep that name.
+[Methods](docs/MEASUREMENTS.md) cover pinned downloads, numerical checks, cloud execution and v3 reproduction; [BASELINE](docs/BASELINE.md) separates each comparison. Formerly cpu-decode: the binary, schemas, Modal names and evidence keep that name.
 
 [Qwen](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct) weights: Apache-2.0; my decoder: MIT. [Transformers](https://github.com/huggingface/transformers): oracle. [llama.cpp](https://github.com/ggml-org/llama.cpp): baseline. [Prompt-lookup attribution](https://github.com/apoorvumang/prompt-lookup-decoding) and [prior work](docs/PRIOR_WORK.md).
 
