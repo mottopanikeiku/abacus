@@ -1,0 +1,48 @@
+{
+  "model_id": "Qwen/Qwen2.5-0.5B-Instruct",
+  "revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+  "greedy_steps": 16,
+  "policy": "Fixed before collecting the current implementation's results. These authored prompts broaden numerical agreement checks beyond fiction; they are not a calibrated task-accuracy benchmark or a format-selection set.",
+  "prompts": [
+    {
+      "id": "python-boundary",
+      "chat": false,
+      "text": "def lower_bound(values, target):\n    \"\"\"Return the first index whose value is at least target.\"\"\"\n    left, right = 0, len(values)\n    while left < right:\n        middle = (left + right) // 2\n        if values[middle] < target:\n            left = middle + 1\n        else:\n            right = middle\n    return"
+    },
+    {
+      "id": "typescript-null",
+      "chat": false,
+      "text": "type Reading = { value: number | null; unit: string };\nfunction formatReading(reading: Reading): string {\n  if (reading.value === null) return 'unavailable';\n  return"
+    },
+    {
+      "id": "structured-output",
+      "chat": true,
+      "messages": [
+        {"role": "system", "content": "Return only valid JSON. Do not use Markdown."},
+        {"role": "user", "content": "Represent a book titled Small Engines with 24 chapters and a boolean field available set to true. Use the keys title, chapters, and available."}
+      ]
+    },
+    {
+      "id": "reasoning-units",
+      "chat": true,
+      "messages": [
+        {"role": "user", "content": "A process reads 500 megabytes for each token. Sustained read bandwidth is 40 gigabytes per second. Using decimal units and ignoring all other work, what is its upper bound in tokens per second? Show the units in one short calculation."}
+      ]
+    },
+    {
+      "id": "unicode-instruction",
+      "chat": true,
+      "messages": [
+        {"role": "user", "content": "Translate into English, keeping the accented name unchanged: Élise prépare du café, puis elle lit un livre. Give only the translation."}
+      ]
+    },
+    {
+      "id": "editing-preservation",
+      "chat": true,
+      "messages": [
+        {"role": "user", "content": "Change only the timeout from 30 to 45 in the following configuration. Preserve the other fields and return only the configuration.\n{\"service\":\"decoder\",\"timeout\":30,\"threads\":2,\"cache\":\"f16\"}"}
+      ]
+    }
+  ],
+  "benchmark": {"scope": "Numerical validation only; no throughput claims from these prompts."}
+}

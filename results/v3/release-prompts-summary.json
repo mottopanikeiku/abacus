@@ -1,0 +1,40 @@
+{
+  "source_passed": true,
+  "oracle": "fp32",
+  "tolerance": {
+    "atol": 0.003,
+    "rtol": 0.0003,
+    "unquantized_requires_exact_greedy": true,
+    "quant_max_position_kl_nats": null,
+    "quant_min_top1_agreement": null,
+    "quant_greedy_match_is_diagnostic": true
+  },
+  "fixed_prompts": 6,
+  "unquantized": {
+    "max_abs_logit_error": 0.0003871917724609375,
+    "positions": 476,
+    "allclose": true,
+    "greedy_tokens": 96,
+    "greedy_matching_tokens": 96,
+    "all_greedy_sequences_identical": true
+  },
+  "quantized": {
+    "prompt_only": {
+      "positions": 386,
+      "top1_matches": 373,
+      "top1_agreement": 0.966321243523316,
+      "mean_kl_reference_candidate_nats": 0.0058384280415623045,
+      "max_kl_reference_candidate_nats": 0.22658567082470837
+    },
+    "prompt_and_reference_continuation": {
+      "positions": 476,
+      "top1_matches": 462,
+      "top1_agreement": 0.9705882352941176,
+      "mean_kl_reference_candidate_nats": 0.004820128248543922,
+      "max_kl_reference_candidate_nats": 0.22658567082470837
+    },
+    "greedy_sequences_matching": 5,
+    "quality_is_reporting_only": true
+  },
+  "source": "results/v3/release-prompts.json"
+}
