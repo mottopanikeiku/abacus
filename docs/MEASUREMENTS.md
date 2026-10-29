@@ -30,6 +30,16 @@ changes, not new timing claims; historical timings are unchanged.
 
 I added a layer-major `Engine::batch(tokens, head_start)` path. Its four-column projection tiles reuse each weight load across token columns, while each row keeps the single-token reduction order. Attention remains causal: I store and attend to each new token in order within each layer. The returned flat vector contains only rows `tokens[head_start:]` and is reused on the next batch call. `head_start == tokens.size()` skips the vocabulary projection; an empty batch is a no-op. Invalid token IDs, head ranges and capacity are checked before cache writes.
 
+Projection tiles now specialize widths one through four before scheduling rows;
+the one-column path reuses single-token arithmetic. The serial persistent pool
+executes tasks directly without publishing work to nonexistent workers. The SIMD
+attention merge reuses head-local scratch for block coefficients and holds output
+vectors in registers, preserving each dimension's ascending-block FMA order.
+Expanded [projection](../tests/batch.cpp) and [attention](../tests/native.cpp) tests
+cover widths, mixed formats, scale groups, tails, wide-value fallback and quantized
+cache boundaries. These changes add no timing claim; historical measurements are
+unchanged and cannot attribute performance to this independent rescue branch.
+
 Prompt lookup searches earlier occurrences of the longest suffix first, then the most recent occurrence. I verify one already-known greedy token plus up to four draft tokens in a batched pass. At the first mismatch I keep the model's greedy prediction, rewind the cache past the accepted inputs, and discard the remaining drafts. This is exact greedy decoding for the selected cache/kernel, not sampling and not an accuracy improvement. [Twelve public prompts](../configs/lookup-prompts.json), equally split between copying/editing/quoted summarization and open-ended writing, were committed before measurement. I report accepted tokens divided by all proposed draft tokens, including unused drafts after the first mismatch; I do not average prompt-level percentages.
 
 `i8` stores symmetric per-token/per-head int8 K/V with FP32 scales. `i8-centered` uses the channel-wise per-head mean of exactly the first 64 post-RoPE key vectors. Before that boundary I retain raw FP32 prefix keys; values are int8 from the start. At the boundary I quantize all prefix residuals, then subtract the fixed mean from later keys. The shared query-dot-mean shift cancels in softmax and is omitted. This is a causal prefix estimate, not the unavailable mean of all future keys. I keep the raw prefix for replay below the boundary; no full-cache FP32 copy exists. Allocated bytes include key padding, value data, both scale arrays, the mean, and the raw prefix. They exclude attention and model workspaces and are not measured peak memory.

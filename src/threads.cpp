@@ -176,6 +176,11 @@ struct ThreadPool::Impl {
             }
             return;
         }
+        // The caller is the only participant; there is no work to publish.
+        if (workers.empty()) {
+            for (size_t task = 0; task < count; ++task) callback(data, task);
+            return;
+        }
         tasks = count; function = callback; context = data;
         // Keep streaming rows contiguous without changing any logical task boundaries.
         claim_batch = count >= size_t(threads) * 16 ? 8 : 1;

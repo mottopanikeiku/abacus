@@ -195,25 +195,42 @@ void merge_simd_head(Work& w, size_t h) noexcept {
     float maximum = -std::numeric_limits<float>::infinity();
     for (size_t b = 0; b < w.active_blocks; ++b)
         maximum = std::max(maximum, w.workspace.maxima[(kv * w.workspace.blocks + b) * groups + g]);
+    // Value aggregation has finished. Reuse this head's probability scratch,
+    // not the interleaved sums: merge workers must not rewrite adjacent heads.
+    float* coefficients = w.workspace.scores.data() + h * w.workspace.capacity;
     float denominator = 0;
-    std::fill(w.out + h * w.dim, w.out + (h + 1) * w.dim, 0);
     for (size_t b = 0; b < w.active_blocks; ++b) {
         size_t slot = (kv * w.workspace.blocks + b) * groups + g;
         float factor = std::exp(w.workspace.maxima[slot] - maximum);
-        // Reuse each local sum as its globally rescaled mass.
-        w.workspace.sums[slot] *= factor;
-        denominator += w.workspace.sums[slot];
+        coefficients[b] = w.workspace.sums[slot] * factor;
+        denominator += coefficients[b];
     }
     // Local weighted averages and normalized merge coefficients keep
     // finite averages from overflowing an unnormalized intermediate.
-    for (size_t b = 0; b < w.active_blocks; ++b) {
-        size_t slot = (kv * w.workspace.blocks + b) * groups + g;
-        __m512 multiplier = _mm512_set1_ps(w.workspace.sums[slot] / denominator);
-        for (size_t j = 0; j < w.dim; j += 16) {
-            float* output = w.out + h * w.dim + j;
-            _mm512_storeu_ps(output, _mm512_fmadd_ps(_mm512_loadu_ps(w.workspace.weighted.data() + slot * w.dim + j),
-                                                   multiplier, _mm512_loadu_ps(output)));
+    // Compute each coefficient once, in block order, before tiling outputs.
+    for (size_t b = 0; b < w.active_blocks; ++b) coefficients[b] /= denominator;
+    size_t j = 0;
+    for (; j + 32 <= w.dim; j += 32) {
+        __m512 first = _mm512_setzero_ps(), second = _mm512_setzero_ps();
+        for (size_t b = 0; b < w.active_blocks; ++b) {
+            size_t slot = (kv * w.workspace.blocks + b) * groups + g;
+            __m512 multiplier = _mm512_set1_ps(coefficients[b]);
+            const float* weighted = w.workspace.weighted.data() + slot * w.dim + j;
+            first = _mm512_fmadd_ps(_mm512_loadu_ps(weighted), multiplier, first);
+            second = _mm512_fmadd_ps(_mm512_loadu_ps(weighted + 16), multiplier, second);
         }
+        _mm512_storeu_ps(w.out + h * w.dim + j, first);
+        _mm512_storeu_ps(w.out + h * w.dim + j + 16, second);
+    }
+    if (j < w.dim) {
+        __m512 output = _mm512_setzero_ps();
+        for (size_t b = 0; b < w.active_blocks; ++b) {
+            size_t slot = (kv * w.workspace.blocks + b) * groups + g;
+            __m512 multiplier = _mm512_set1_ps(coefficients[b]);
+            output = _mm512_fmadd_ps(_mm512_loadu_ps(w.workspace.weighted.data() + slot * w.dim + j),
+                                    multiplier, output);
+        }
+        _mm512_storeu_ps(w.out + h * w.dim + j, output);
     }
 }
 #endif

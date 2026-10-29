@@ -150,7 +150,8 @@ void forward_tests(const fs::path& model, bool integer) {
 }
 void projection_tests() {
     ThreadPool pool(2, {}, true, false);
-    constexpr size_t rows = 5;
+    // Exercise both a complete scheduler row block and its partial final block.
+    constexpr size_t rows = 67;
     for (size_t cols : {size_t(17), size_t(65), size_t(128)}) {
         std::vector<float> weights(rows * cols), scales(rows), input(4 * (cols + 3));
         std::vector<uint16_t> halves(weights.size()); std::vector<int8_t> bytes(weights.size());
@@ -173,37 +174,83 @@ void projection_tests() {
             }
         }
     }
-    constexpr size_t cols = 128;
-    std::vector<int8_t> weights(rows * cols);
-    std::vector<float> input(cols * 4), bias(rows, .3f);
-    for (size_t j = 0; j < weights.size(); ++j) weights[j] = int8_t(int(j % 255) - 128);
-    for (size_t j = 0; j < input.size(); ++j) input[j] = std::sin(float(j) * .17f);
-    for (size_t group : {size_t(0), size_t(32), size_t(64), size_t(128)})
-    for (DType scale_type : {DType::f16, DType::f32}) {
-        std::vector<float> scales(rows * (group ? cols / group : 1), .003f);
-        std::vector<uint16_t> halves(scales.size(), float_half(.003f));
-        Matrix m{weights.data(), scale_type == DType::f16 ? static_cast<const void*>(halves.data()) : scales.data(), rows, cols, DType::i8, group, scale_type};
-        for (Kernel kernel : kernels(true)) {
-            std::vector<Activation> activations;
-            for (size_t c = 0; c < 4; ++c) activations.emplace_back(cols, kernel);
-            std::vector<float> actual(4 * rows), expected(actual.size());
-            BatchProjection item{&m, actual.data(), rows, bias.data()};
-            batch_projections(&item, 1, input.data(), 4, cols, kernel, pool, activations.data());
-            for (size_t c = 0; c < 4; ++c) {
-                Projection one{&m, expected.data() + c * rows, bias.data()};
-                projections(&one, 1, input.data() + c * cols, kernel, pool, activations[c]);
+    for (size_t cols : {size_t(96), size_t(113), size_t(128), size_t(256)}) {
+        std::vector<int8_t> weights(rows * cols), up_weights(weights.size());
+        std::vector<float> input(cols * 4), bias(rows);
+        for (size_t j = 0; j < weights.size(); ++j) {
+            weights[j] = int8_t(int(j % 255) - 128);
+            up_weights[j] = int8_t(int((j * 37 + 19) % 255) - 128);
+        }
+        for (size_t r = 0; r < rows; ++r) bias[r] = .2f * std::sin(float(r) * .29f);
+        for (size_t j = 0; j < input.size(); ++j) input[j] = std::sin(float(j) * .17f);
+        for (size_t group : {size_t(0), size_t(32), size_t(64), size_t(128)})
+        for (DType scale_type : {DType::f16, DType::f32}) {
+            if (group && cols % group) continue;
+            std::vector<float> scales(rows * (group ? cols / group : 1)), up_scales(scales.size());
+            std::vector<uint16_t> halves(scales.size()), up_halves(scales.size());
+            for (size_t j = 0; j < scales.size(); ++j) {
+                scales[j] = .0007f + .00013f * float(j % 17);
+                up_scales[j] = .0011f + .00017f * float((j * 3 + 5) % 23);
+                halves[j] = float_half(scales[j]);
+                up_halves[j] = float_half(up_scales[j]);
             }
-            exact(actual, expected);
-            BatchProjection pair[]{{&m, actual.data(), rows}, {&m, nullptr, 0}};
-            batch_projections(pair, 2, input.data(), 4, cols, kernel, pool, activations.data(), true);
-            for (size_t c = 0; c < 4; ++c) {
-                Projection one[]{{&m, expected.data() + c * rows}, {&m, nullptr}};
-                projections(one, 2, input.data() + c * cols, kernel, pool, activations[c], true);
+            Matrix m{weights.data(), scale_type == DType::f16 ? static_cast<const void*>(halves.data()) : scales.data(), rows, cols, DType::i8, group, scale_type};
+            Matrix up{up_weights.data(), scale_type == DType::f16 ? static_cast<const void*>(up_halves.data()) : up_scales.data(), rows, cols, DType::i8, group, scale_type};
+            for (Kernel kernel : kernels(true)) {
+                if (kernel == Kernel::vnni && cols % 32) continue;
+                std::vector<Activation> activations;
+                for (size_t c = 0; c < 4; ++c) activations.emplace_back(cols, kernel);
+                std::vector<float> actual(4 * (rows + 2)), expected(actual.size());
+                BatchProjection item{&m, actual.data(), rows + 2, bias.data()};
+                // One-column batches retain independent row arithmetic. Distinct
+                // gate/up weights and scales expose accidental sharing of either.
+                // Width 113 has three vector tails and a scalar tail; 256 crosses
+                // a group128 scale boundary in both rows of a pair.
+                for (size_t count : {size_t(1), size_t(2), size_t(3), size_t(4)}) {
+                    std::fill(actual.begin(), actual.end(), -99);
+                    std::fill(expected.begin(), expected.end(), -99);
+                    batch_projections(&item, 1, input.data(), count, cols, kernel, pool, activations.data());
+                    for (size_t c = 0; c < count; ++c) {
+                        Projection one{&m, expected.data() + c * (rows + 2), bias.data()};
+                        projections(&one, 1, input.data() + c * cols, kernel, pool, activations[c]);
+                    }
+                    exact(actual, expected);
+                    BatchProjection pair[]{{&m, actual.data(), rows + 2}, {&up, nullptr, 0}};
+                    batch_projections(pair, 2, input.data(), count, cols, kernel, pool, activations.data(), true);
+                    for (size_t c = 0; c < count; ++c) {
+                        Projection one[]{{&m, expected.data() + c * (rows + 2)}, {&up, nullptr}};
+                        projections(one, 2, input.data() + c * cols, kernel, pool, activations[c], true);
+                    }
+                    exact(actual, expected);
+                }
+                if (kernel == Kernel::simd512x4 && cols == 128 && group == 32 && scale_type == DType::f16) {
+                    // Fused gate/up projections must respect each matrix's
+                    // independent weight and scale format.
+                    auto compare_up = [&](const Matrix& other) {
+                        std::fill(actual.begin(), actual.end(), -99);
+                        std::fill(expected.begin(), expected.end(), -99);
+                        BatchProjection reference[]{{&m, actual.data(), rows + 2}, {&other, nullptr, 0}};
+                        batch_projections(reference, 2, input.data(), 1, cols, kernel, pool, activations.data(), true);
+                        Projection pair[]{{&m, expected.data()}, {&other, nullptr}};
+                        projections(pair, 2, input.data(), kernel, pool, activations[0], true);
+                        exact(actual, expected);
+                    };
+                    Matrix other = up;
+                    other.scale_dtype = DType::f32; other.scales = up_scales.data();
+                    compare_up(other);
+                    for (size_t other_group : {size_t(0), size_t(64)}) {
+                        other = up; other.group_size = other_group;
+                        compare_up(other);
+                    }
+                    std::vector<float> float_weights(up_weights.size());
+                    for (size_t j = 0; j < float_weights.size(); ++j) float_weights[j] = float(up_weights[j]) * .0013f;
+                    Matrix float_up{float_weights.data(), nullptr, rows, cols, DType::f32};
+                    compare_up(float_up);
+                }
+                fails([&] { batch_projections(&item, 1, input.data(), 5, cols, kernel, pool, activations.data()); });
+                fails([&] { batch_projections(&item, 1, input.data(), 0, cols, kernel, pool, activations.data()); });
+                fails([&] { batch_projections(&item, 1, input.data(), 4, cols - 1, kernel, pool, activations.data()); });
             }
-            exact(actual, expected);
-            fails([&] { batch_projections(&item, 1, input.data(), 5, cols, kernel, pool, activations.data()); });
-            fails([&] { batch_projections(&item, 1, input.data(), 0, cols, kernel, pool, activations.data()); });
-            fails([&] { batch_projections(&item, 1, input.data(), 4, cols - 1, kernel, pool, activations.data()); });
         }
     }
 }
@@ -215,16 +262,21 @@ void wide_projection_tests() {
     std::vector<int8_t> weights(rows * cols);
     for (size_t j = 0; j < weights.size(); ++j) weights[j] = int8_t(int(j % 255) - 128);
     std::vector<float> input(4 * cols);
-    for (size_t c = 0; c < 4; ++c) for (size_t j = 0; j < cols; ++j)
-        input[c * cols + j] = std::sin(float(j) * .3f) * (c == 0 ? 1e-30f : .7f);
+    // Different columns cross into the wide path at different groups, including
+    // after a normal first group; their neighboring columns must stay exact.
+    for (size_t c = 0; c < 4; ++c) for (size_t j = 0; j < cols; ++j) {
+        bool tiny = c == 1 || (c == 0 && j >= 64) || (c == 3 && j < 64);
+        input[c * cols + j] = std::sin(float(j) * .3f) * (tiny ? 1e-30f : .7f);
+    }
     std::vector<Activation> activations;
     for (size_t c = 0; c < 4; ++c) activations.emplace_back(cols, Kernel::vnni16);
+    for (size_t count : {size_t(1), size_t(2), size_t(3), size_t(4)})
     for (float scale : {1e-30f, 1e20f}) {
-        std::vector<float> scales(rows, scale), actual(rows * 4), expected(actual.size());
+        std::vector<float> scales(rows, scale), actual(rows * count), expected(actual.size());
         Matrix matrix{weights.data(), scales.data(), rows, cols, DType::i8};
         BatchProjection item{&matrix, actual.data(), rows};
-        batch_projections(&item, 1, input.data(), 4, cols, Kernel::vnni16, pool, activations.data());
-        for (size_t c = 0; c < 4; ++c)
+        batch_projections(&item, 1, input.data(), count, cols, Kernel::vnni16, pool, activations.data());
+        for (size_t c = 0; c < count; ++c)
             matvec(matrix, input.data() + c * cols, expected.data() + c * rows, Kernel::vnni16, pool);
         exact(actual, expected);
     }
