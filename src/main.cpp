@@ -50,13 +50,14 @@ void usage() {
     std::cout << "cpu-decode cpus\n"
                  "cpu-decode quantize --model HF_SNAPSHOT --output INT8_DIR [--group-size 0|32|64|128 --scale-dtype f16|f32]\n"
                  "cpu-decode logits --model DIR --tokens ID,ID --output PREFIX [--threads N --kernel auto|scalar|simd256|simd512|simd512x4|vnni|vnni16]\n"
-                 "cpu-decode generate --model DIR --tokens ID,ID --steps N [--lookup K --ngram N --prefill-batch K --output JSON --threads N --kernel ...]\n"
-                 "cpu-decode time-generate --model DIR --tokens ID,ID --steps N --repeats N [same generation options]\n"
+                 "cpu-decode generate --model DIR --tokens ID,ID --steps N [--stop-tokens ID,ID --lookup K --ngram N --prefill-batch K --output JSON --threads N --kernel ...]\n"
+                 "cpu-decode time-generate --model DIR --tokens ID,ID --steps N --repeats N [--lookup K --ngram N --prefill-batch K --output JSON --threads N --kernel ...]\n"
                  "cpu-decode bench --model DIR --tokens ID,ID --context N --steps N --repeats N [--output JSON --threads N --kernel ...]\n"
                  "Forward modes: --rope cached|direct --kv f16|f32|i8|i8-centered --attention blocked|scalar --scheduler pool|openmp --affinity strict|unpinned --cpu-set IDS.\n"
                  "Kernel defaults to auto (FP32 activations); vnni uses int8 activations/groups of32; vnni16 uses int16 activations/groups of64. Both require int8 weights.\n"
                  "logits accepts --logits-start N or --logits-positions N,N and --batch K (default 1).\n"
-                 "Token IDs only; generation does not stop at EOS. logits writes PREFIX.bin float32 [positions,vocab] and PREFIX.json.\n";
+                 "Token IDs only; generate is fixed-length unless --stop-tokens is supplied (terminal token included). Timing commands never stop at EOS.\n"
+                 "logits writes PREFIX.bin float32 [positions,vocab] and PREFIX.json.\n";
 }
 }
 int main(int argc, char** argv) {
@@ -67,12 +68,17 @@ int main(int argc, char** argv) {
             if (argc != 2) throw std::runtime_error("cpus takes no arguments");
             emit(decode::cpu_topology(), ""); return 0;
         }
-        std::set<std::string> known{"--model", "--output", "--tokens", "--threads", "--kernel", "--steps", "--context", "--repeats", "--rope", "--kv", "--attention", "--scheduler", "--affinity", "--cpu-set", "--group-size", "--scale-dtype", "--logits-start", "--logits-positions", "--batch", "--lookup", "--ngram", "--prefill-batch"};
+        std::set<std::string> known{"--model", "--output", "--tokens", "--threads", "--kernel", "--steps", "--context", "--repeats", "--rope", "--kv", "--attention", "--scheduler", "--affinity", "--cpu-set", "--group-size", "--scale-dtype", "--logits-start", "--logits-positions", "--batch", "--lookup", "--ngram", "--prefill-batch", "--stop-tokens"};
         std::map<std::string, std::string> options;
         for (int i = 2; i < argc; i += 2) {
             std::string key(argv[i]);
             if (!known.count(key) || i + 1 >= argc || !options.emplace(key, argv[i + 1]).second) throw std::runtime_error("unknown, duplicate or incomplete option: " + key);
         }
+        if (command != "generate" && options.count("--stop-tokens"))
+            throw std::runtime_error("--stop-tokens is only supported by generate; timing uses fixed steps");
+        if (command != "generate" && command != "time-generate")
+            for (const char* key : {"--lookup", "--ngram", "--prefill-batch"})
+                if (options.count(key)) throw std::runtime_error(std::string(key) + " requires generate or time-generate");
         auto required = [&](const std::string& name) {
             auto found = options.find(name);
             if (found == options.end() || found->second.empty()) throw std::runtime_error("missing " + name);
@@ -113,7 +119,10 @@ int main(int argc, char** argv) {
         if (steps > 1000000) throw std::runtime_error("too many steps");
         size_t context = command == "bench" ? number(required("--context")) : prompt.size();
         if (!context || context > 1000000) throw std::runtime_error("invalid context size");
-        size_t capacity = context + (command == "logits" ? 0 : steps);
+        // Generation selects the final token without consuming it; bench times
+        // a forward for every selected token, including the last.
+        size_t consumed = command == "bench" ? steps : (command != "logits" && steps ? steps - 1 : 0);
+        size_t capacity = context + consumed;
         if (command == "bench" && (kv == "i8" || kv == "i8-centered"))
             throw std::runtime_error("int8 KV timing uses tools.time_v3; operation-level traffic profiling is not available");
         decode::Engine engine(model, kernel, int(nthreads), capacity, engine_options);
@@ -180,8 +189,12 @@ int main(int argc, char** argv) {
             lookup.prefill_batch = number(option("--prefill-batch", "8"));
             if (lookup.prefill_batch > 64 || lookup.max_ngram > 64) throw std::runtime_error("prefill batch and ngram must be 1..64");
             if (command == "generate") {
-                auto generated = decode::generate(engine, prompt, steps, lookup);
+                auto stop_tokens = options.count("--stop-tokens") ? tokens(required("--stop-tokens")) : std::vector<int>{};
+                auto generated = decode::generate(engine, prompt, steps, lookup, nullptr, stop_tokens);
                 result["generated_tokens"] = generated.tokens; result["steps"] = steps;
+                result["generated_token_count"] = generated.tokens.size();
+                result["finish_reason"] = generated.stopped ? "stop" : "length";
+                result["stop_tokens"] = stop_tokens;
                 result["lookup"] = generated.json();
             } else {
                 size_t repeats = number(option("--repeats", "5"));

@@ -475,6 +475,7 @@ const std::vector<float>& Engine::batch(const std::vector<int>& tokens, size_t h
 }
 size_t Engine::vocab_size() const { return impl->config.vocab; }
 size_t Engine::position() const { return impl->pos; }
+size_t Engine::capacity() const { return impl->capacity; }
 Json Engine::metadata() const {
     return {{"weight_dtype", impl->weight_dtype}, {"group_size", impl->embedding.group_size},
             {"scale_dtype", impl->embedding.scale_dtype == DType::f16 ? "f16" : "f32"},

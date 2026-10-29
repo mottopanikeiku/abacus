@@ -122,6 +122,7 @@ public:
     size_t vocab_size() const;
     void rewind(size_t position);
     size_t position() const;
+    size_t capacity() const;
     Json metadata() const;
 private:
     struct Impl;
