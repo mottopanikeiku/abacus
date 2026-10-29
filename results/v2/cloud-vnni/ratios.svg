@@ -1,0 +1,146 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="452" viewBox="0 0 820 452" role="img" aria-labelledby="title">
+<title id="title">Native g64f16/int16 over llama.cpp Q8_0 paired decode throughput: six cells on one cloud host</title>
+<rect width="820" height="452" fill="#ffffff"/>
+<g font-family="sans-serif" fill="#17212b">
+<text x="24" y="30" font-size="18">Native g64f16/int16 over llama.cpp Q8_0 paired decode throughput</text>
+<text x="24" y="54" font-size="13">One cloud host: 24 virtual CPUs, CPUID family 25 model 17 · F16 KV · 128 forwards per sample</text>
+<text x="230" y="88" font-size="13">Paired ratio (above 1: native faster)</text>
+<text x="610" y="88" font-size="13">Median [95% interval]</text>
+<path d="M 302.00 98 V 340" stroke="#7a8691" stroke-dasharray="4 3"/>
+<text x="24" y="125" font-size="13">1 thread · context 128</text>
+<circle class="pair" cx="363.02" cy="120" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="359.74" cy="120" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="439.13" cy="120" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="411.32" cy="120" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="355.16" cy="120" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="416.86" cy="120" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="386.68" cy="120" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="396.84" cy="120" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="403.15" cy="120" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="406.54" cy="120" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="426.34" cy="120" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="363.10" cy="120" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="385.42" cy="120" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="369.58" cy="120" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="344.32" cy="120" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="354.64" cy="120" r="2.5" fill="none" stroke="#8a99a6"/>
+<rect x="361.38" y="117" width="47.55" height="6" fill="#29719c" fill-opacity="0.45"/>
+<circle cx="386.05" cy="120" r="5" fill="#29719c"/>
+<text x="610" y="125" font-size="13">1.233× [1.165, 1.297]</text>
+<text x="24" y="163" font-size="13">2 threads · context 128</text>
+<circle class="pair" cx="317.29" cy="158" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="304.39" cy="158" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="313.32" cy="158" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="348.46" cy="158" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="325.78" cy="158" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="329.88" cy="158" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="354.09" cy="158" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="327.21" cy="158" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="323.64" cy="158" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="372.67" cy="158" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="410.04" cy="158" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="412.64" cy="158" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="425.33" cy="158" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="353.54" cy="158" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="375.94" cy="158" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="369.94" cy="158" r="2.5" fill="none" stroke="#8a99a6"/>
+<rect x="324.71" y="155" width="51.23" height="6" fill="#29719c" fill-opacity="0.45"/>
+<circle cx="351.00" cy="158" r="5" fill="#29719c"/>
+<text x="610" y="163" font-size="13">1.136× [1.063, 1.205]</text>
+<text x="24" y="201" font-size="13">4 threads · context 128</text>
+<circle class="pair" cx="257.72" cy="196" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="270.65" cy="196" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="291.86" cy="196" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="330.02" cy="196" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="329.06" cy="196" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="312.91" cy="196" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="357.63" cy="196" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="349.47" cy="196" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="403.77" cy="196" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="387.77" cy="196" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="344.44" cy="196" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="344.19" cy="196" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="342.52" cy="196" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="338.66" cy="196" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="329.21" cy="196" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="304.25" cy="196" r="2.5" fill="none" stroke="#8a99a6"/>
+<rect x="308.58" y="193" width="40.89" height="6" fill="#29719c" fill-opacity="0.45"/>
+<circle cx="334.34" cy="196" r="5" fill="#29719c"/>
+<text x="610" y="201" font-size="13">1.090× [1.018, 1.132]</text>
+<text x="24" y="239" font-size="13">1 thread · context 4096</text>
+<circle class="pair" cx="412.07" cy="234" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="460.22" cy="234" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="472.22" cy="234" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="358.10" cy="234" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="426.55" cy="234" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="433.08" cy="234" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="420.48" cy="234" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="445.27" cy="234" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="465.45" cy="234" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="462.82" cy="234" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="424.49" cy="234" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="398.34" cy="234" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="418.46" cy="234" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="416.54" cy="234" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="488.02" cy="234" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="424.86" cy="234" r="2.5" fill="none" stroke="#8a99a6"/>
+<rect x="418.46" y="231" width="43.06" height="6" fill="#29719c" fill-opacity="0.45"/>
+<circle cx="425.70" cy="234" r="5" fill="#29719c"/>
+<text x="610" y="239" font-size="13">1.344× [1.323, 1.443]</text>
+<text x="24" y="277" font-size="13">2 threads · context 4096</text>
+<circle class="pair" cx="523.99" cy="272" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="473.34" cy="272" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="512.43" cy="272" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="534.79" cy="272" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="501.32" cy="272" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="504.10" cy="272" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="406.76" cy="272" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="464.95" cy="272" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="465.84" cy="272" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="516.52" cy="272" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="517.26" cy="272" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="520.01" cy="272" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="472.47" cy="272" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="472.85" cy="272" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="484.70" cy="272" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="461.94" cy="272" r="2.5" fill="none" stroke="#8a99a6"/>
+<rect x="469.15" y="269" width="47.74" height="6" fill="#29719c" fill-opacity="0.45"/>
+<circle cx="493.01" cy="272" r="5" fill="#29719c"/>
+<text x="610" y="277" font-size="13">1.531× [1.464, 1.597]</text>
+<text x="24" y="315" font-size="13">4 threads · context 4096</text>
+<circle class="pair" cx="455.95" cy="310" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="445.17" cy="310" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="471.83" cy="310" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="443.16" cy="310" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="558.66" cy="310" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="502.26" cy="310" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="483.68" cy="310" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="421.05" cy="310" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="402.57" cy="310" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="391.41" cy="310" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="395.44" cy="310" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="506.33" cy="310" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="422.00" cy="310" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="378.17" cy="310" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="391.31" cy="310" r="2.5" fill="none" stroke="#8a99a6"/>
+<circle class="pair" cx="395.31" cy="310" r="2.5" fill="none" stroke="#8a99a6"/>
+<rect x="395.37" y="307" width="82.39" height="6" fill="#29719c" fill-opacity="0.45"/>
+<circle cx="432.58" cy="310" r="5" fill="#29719c"/>
+<text x="610" y="315" font-size="13">1.363× [1.259, 1.488]</text>
+<path d="M 230 340 H 590" stroke="#17212b"/>
+<path d="M 230.00 340 v 5" stroke="#17212b"/>
+<text x="230.00" y="360" font-size="12" text-anchor="middle">0.8×</text>
+<path d="M 302.00 340 v 5" stroke="#17212b"/>
+<text x="302.00" y="360" font-size="12" text-anchor="middle">1.0×</text>
+<path d="M 374.00 340 v 5" stroke="#17212b"/>
+<text x="374.00" y="360" font-size="12" text-anchor="middle">1.2×</text>
+<path d="M 446.00 340 v 5" stroke="#17212b"/>
+<text x="446.00" y="360" font-size="12" text-anchor="middle">1.4×</text>
+<path d="M 518.00 340 v 5" stroke="#17212b"/>
+<text x="518.00" y="360" font-size="12" text-anchor="middle">1.6×</text>
+<path d="M 590.00 340 v 5" stroke="#17212b"/>
+<text x="590.00" y="360" font-size="12" text-anchor="middle">1.8×</text>
+<text x="24" y="388" font-size="12">Filled dot: median of 16 chronological pairs in 8 ABBA quartets. Bar: individual 95% quartet-bootstrap interval.</text>
+<text x="24" y="406" font-size="12">Intervals are per-cell, not simultaneous. Rings: single pairs. Dashed line: parity.</text>
+<text x="24" y="424" font-size="12">One host with worker-lifetime CPU binding; not laptop CLI, v3 or other-host performance.</text>
+</g></svg>
