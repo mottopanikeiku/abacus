@@ -56,7 +56,7 @@ Centered KV saves **45.3%** versus F16 but remains numerically worse. Storage in
 I did **not** run the full 15-cell, nine-configuration laptop matrix. Cloud v2 results do not measure v3 batching, lookup or int8-KV speed.
 <!-- FINAL_TABLE_END -->
 
-Host load, clocks and NUMA are uncontrolled; I have no cloud read-bandwidth ceiling. This is one model, not downstream-task accuracy or batched serving. Lookup exactness is relative to its chosen numerical path. [Earlier short-window measurements](results/v2/int16-shipped-short/summary.json) remain development evidence. My [archived v1 laptop comparison](results/tables.md), with FP32-arithmetic int8 and FP32 KV, led Q8_0 in only 3 of 15 cells.
+Host load, clocks and NUMA are uncontrolled; I have no cloud read-bandwidth ceiling. This is one model, not downstream-task accuracy or batched serving. Lookup exactness is relative to its chosen numerical path. [Earlier short-window measurements](results/v2/int16-shipped-short/summary.json) remain development evidence. My [archived v1 laptop comparison](docs/BASELINE.md#archived-v1-laptop-comparison), with FP32-arithmetic int8 and FP32 KV, led Q8_0 in only 3 of 15 cells.
 
 ## Reproduce and attribution
 
