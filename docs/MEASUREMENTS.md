@@ -1,5 +1,31 @@
 # Measurement protocol
 
+## Generation boundaries
+
+The text wrapper uses the local snapshot's actual chat template and configured
+EOS IDs. It loads no remote tokenizer code. `--steps` is a maximum including the
+terminal token; stdout contains decoded text only, while `--stats` writes native
+metadata to stderr (or to a supplied filename).
+
+```sh
+uv run python -m tools.generate --model "$INT8" --tokenizer "$MODEL" \
+  --prompt 'Hello!' --chat --steps 64 --threads 2 --stats
+```
+
+Native `generate` remains fixed-length unless `--stop-tokens ID,ID` is supplied.
+The emitted terminal token is not consumed. Lookup bounds drafts by available KV
+capacity and rewinds speculative suffixes, including EOS, to the same consumed
+prefix as ordinary greedy decoding. Zero steps prefills without vocabulary heads.
+Generation needs `prompt + max(steps - 1, 0)` slots; `bench` consumes every measured
+token and still needs `context + steps`. Timing commands reject stop tokens.
+
+Ordinary decoding does not allocate lookup history; one- and two-token budgets
+need no draft state. [Native state tests](../tests/generation.cpp) and
+[wrapper/CLI tests](../tests/test_generate.py) cover stop, rollback, capacity and
+template behavior without downloads, plus generation under a caller-held
+`CpuBinding`. The CLI's per-call affinity is unchanged. These are correctness
+changes, not new timing claims; historical timings are unchanged.
+
 ## Batched decoding and int8 KV
 
 I added a layer-major `Engine::batch(tokens, head_start)` path. Its four-column projection tiles reuse each weight load across token columns, while each row keeps the single-token reduction order. Attention remains causal: I store and attend to each new token in order within each layer. The returned flat vector contains only rows `tokens[head_start:]` and is reused on the next batch call. `head_start == tokens.size()` skips the vocabulary projection; an empty batch is a no-op. Invalid token IDs, head ranges and capacity are checked before cache writes.
