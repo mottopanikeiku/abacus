@@ -32,18 +32,20 @@ typedef struct {
     int bos, eos;  // <|endoftext|> and <|im_end|>
 } Tokenizer;
 
+typedef uint16_t bf16; // bfloat16: the top 16 bits of a float32
+
 typedef struct {
     float *attn_norm, *q_norm, *k_norm, *ffn_norm; // RMSNorm weights
-    float *wq, *wk, *wv, *wo;                      // attention projections, [out, in]
-    float *w_gate, *w_up, *w_down;                 // SwiGLU MLP
+    const bf16 *wq, *wk, *wv, *wo;                 // attention projections, [out, in]
+    const bf16 *w_gate, *w_up, *w_down;            // SwiGLU MLP
 } Layer;
 
 typedef struct {
     Config c;
     Tokenizer tok;
-    float *embed;   // [vocab, dim] token embeddings
-    float *lm_head; // [vocab, dim], the same tensor as embed when tied
-    float *norm;    // final RMSNorm
+    const bf16 *embed;   // [vocab, dim] token embeddings
+    const bf16 *lm_head; // [vocab, dim], the same tensor as embed when tied
+    float *norm;         // final RMSNorm
     Layer *layers;
     // activations for the token being processed
     float *x, *xn, *q, *k, *v, *att, *scores, *gate, *up;

@@ -34,18 +34,25 @@ typedef struct {
     size_t off;
 } Reader;
 
-static float bf16_to_f32(uint16_t h) {
+static float bf16_to_f32(bf16 h) {
     uint32_t bits = (uint32_t)h << 16;
     float f;
     memcpy(&f, &bits, sizeof f);
     return f;
 }
 
-// Tensors are stored as bf16, each starting on a 64-byte boundary.
-static float *read_tensor(Reader *r, size_t n) {
+// Tensors are stored as bf16, each starting on a 64-byte boundary. Matrices
+// are used in place, straight from the mapped file.
+static const bf16 *read_bf16(Reader *r, size_t n) {
     r->off = (r->off + 63) & ~(size_t)63;
-    const uint16_t *src = (const uint16_t *)(r->base + r->off);
-    r->off += n * sizeof(uint16_t);
+    const bf16 *p = (const bf16 *)(r->base + r->off);
+    r->off += n * sizeof(bf16);
+    return p;
+}
+
+// Small vectors (norm weights) are widened to float once.
+static float *read_f32(Reader *r, size_t n) {
+    const bf16 *src = read_bf16(r, n);
     float *dst = xcalloc(n, sizeof(float));
     for (size_t i = 0; i < n; i++) dst[i] = bf16_to_f32(src[i]);
     return dst;
@@ -77,24 +84,24 @@ Model *model_load(const char *path) {
     Reader r = {data, tokenizer_load(&m->tok, data + 64) - data};
     int dim = c->dim, hd = c->head_dim;
     int q_dim = c->n_heads * hd, kv_dim = c->n_kv_heads * hd;
-    m->embed = read_tensor(&r, (size_t)c->vocab_size * dim);
+    m->embed = read_bf16(&r, (size_t)c->vocab_size * dim);
     m->layers = xcalloc(c->n_layers, sizeof(Layer));
     for (int l = 0; l < c->n_layers; l++) {
         Layer *L = &m->layers[l];
-        L->attn_norm = read_tensor(&r, dim);
-        L->wq = read_tensor(&r, (size_t)q_dim * dim);
-        L->wk = read_tensor(&r, (size_t)kv_dim * dim);
-        L->wv = read_tensor(&r, (size_t)kv_dim * dim);
-        L->wo = read_tensor(&r, (size_t)dim * q_dim);
-        L->q_norm = read_tensor(&r, hd);
-        L->k_norm = read_tensor(&r, hd);
-        L->ffn_norm = read_tensor(&r, dim);
-        L->w_gate = read_tensor(&r, (size_t)c->hidden_dim * dim);
-        L->w_up = read_tensor(&r, (size_t)c->hidden_dim * dim);
-        L->w_down = read_tensor(&r, (size_t)dim * c->hidden_dim);
+        L->attn_norm = read_f32(&r, dim);
+        L->wq = read_bf16(&r, (size_t)q_dim * dim);
+        L->wk = read_bf16(&r, (size_t)kv_dim * dim);
+        L->wv = read_bf16(&r, (size_t)kv_dim * dim);
+        L->wo = read_bf16(&r, (size_t)dim * q_dim);
+        L->q_norm = read_f32(&r, hd);
+        L->k_norm = read_f32(&r, hd);
+        L->ffn_norm = read_f32(&r, dim);
+        L->w_gate = read_bf16(&r, (size_t)c->hidden_dim * dim);
+        L->w_up = read_bf16(&r, (size_t)c->hidden_dim * dim);
+        L->w_down = read_bf16(&r, (size_t)dim * c->hidden_dim);
     }
-    m->norm = read_tensor(&r, dim);
-    m->lm_head = tied ? m->embed : read_tensor(&r, (size_t)c->vocab_size * dim);
+    m->norm = read_f32(&r, dim);
+    m->lm_head = tied ? m->embed : read_bf16(&r, (size_t)c->vocab_size * dim);
     if (r.off > (size_t)st.st_size) die("model file is truncated");
 
     m->x = xcalloc(dim, sizeof(float));
@@ -137,20 +144,41 @@ static float dot(const float *a, const float *b, int n) {
     return sum;
 }
 
+// The same for bf16 weights: widening a bf16 to float is a 16-bit left shift,
+// so the products are exactly those of the float32 version.
+static float dot_bf16(const bf16 *w, const float *x, int n) {
+    float sum = 0.0f;
+    int i = 0;
+#ifdef __ARM_NEON
+    float32x4_t s0 = vdupq_n_f32(0.0f), s1 = s0, s2 = s0, s3 = s0;
+    for (; i + 16 <= n; i += 16) {
+        uint16x8_t a = vld1q_u16(w + i), b = vld1q_u16(w + i + 8);
+        s0 = vfmaq_f32(s0, vreinterpretq_f32_u32(vshll_n_u16(vget_low_u16(a), 16)), vld1q_f32(x + i));
+        s1 = vfmaq_f32(s1, vreinterpretq_f32_u32(vshll_high_n_u16(a, 16)), vld1q_f32(x + i + 4));
+        s2 = vfmaq_f32(s2, vreinterpretq_f32_u32(vshll_n_u16(vget_low_u16(b), 16)), vld1q_f32(x + i + 8));
+        s3 = vfmaq_f32(s3, vreinterpretq_f32_u32(vshll_high_n_u16(b, 16)), vld1q_f32(x + i + 12));
+    }
+    sum = vaddvq_f32(vaddq_f32(vaddq_f32(s0, s1), vaddq_f32(s2, s3)));
+#endif
+    for (; i < n; i++) sum += bf16_to_f32(w[i]) * x[i];
+    return sum;
+}
+
 typedef struct {
     float *out;
-    const float *x, *w;
+    const float *x;
+    const bf16 *w;
     int n, d;
 } Matmul;
 
 static void matmul_rows(void *arg, int thread, int n_threads) {
     const Matmul *a = arg;
     int begin = (int)((long)a->d * thread / n_threads), end = (int)((long)a->d * (thread + 1) / n_threads);
-    for (int i = begin; i < end; i++) a->out[i] = dot(a->w + (size_t)i * a->n, a->x, a->n);
+    for (int i = begin; i < end; i++) a->out[i] = dot_bf16(a->w + (size_t)i * a->n, a->x, a->n);
 }
 
 // out = w[d, n] @ x[n], each thread computing a slice of the rows
-static void matmul(float *out, const float *x, const float *w, int n, int d) {
+static void matmul(float *out, const float *x, const bf16 *w, int n, int d) {
     Matmul a = {out, x, w, n, d};
     pool_run(matmul_rows, &a);
 }
@@ -226,7 +254,7 @@ static void forward_token(Model *m, int token, int pos) {
     int q_dim = c->n_heads * hd, kv_dim = c->n_kv_heads * hd;
     float *x = m->x, *xn = m->xn;
 
-    memcpy(x, m->embed + (size_t)token * dim, dim * sizeof(float));
+    for (int i = 0; i < dim; i++) x[i] = bf16_to_f32(m->embed[(size_t)token * dim + i]);
     for (int l = 0; l < c->n_layers; l++) {
         const Layer *L = &m->layers[l];
 
