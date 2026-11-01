@@ -8,6 +8,9 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef __ARM_NEON
+#include <arm_neon.h>
+#endif
 
 #define MAX_SEQ 4096
 
@@ -115,6 +118,25 @@ void model_free(Model *m) {
 
 // ---------------------------------------------------------------- math
 
+// Sum of a[i] * b[i]. A single running sum waits on every multiply-add; NEON
+// keeps four 4-wide sums in flight instead.
+static float dot(const float *a, const float *b, int n) {
+    float sum = 0.0f;
+    int i = 0;
+#ifdef __ARM_NEON
+    float32x4_t s0 = vdupq_n_f32(0.0f), s1 = s0, s2 = s0, s3 = s0;
+    for (; i + 16 <= n; i += 16) {
+        s0 = vfmaq_f32(s0, vld1q_f32(a + i), vld1q_f32(b + i));
+        s1 = vfmaq_f32(s1, vld1q_f32(a + i + 4), vld1q_f32(b + i + 4));
+        s2 = vfmaq_f32(s2, vld1q_f32(a + i + 8), vld1q_f32(b + i + 8));
+        s3 = vfmaq_f32(s3, vld1q_f32(a + i + 12), vld1q_f32(b + i + 12));
+    }
+    sum = vaddvq_f32(vaddq_f32(vaddq_f32(s0, s1), vaddq_f32(s2, s3)));
+#endif
+    for (; i < n; i++) sum += a[i] * b[i];
+    return sum;
+}
+
 typedef struct {
     float *out;
     const float *x, *w;
@@ -124,11 +146,7 @@ typedef struct {
 static void matmul_rows(void *arg, int thread, int n_threads) {
     const Matmul *a = arg;
     int begin = (int)((long)a->d * thread / n_threads), end = (int)((long)a->d * (thread + 1) / n_threads);
-    for (int i = begin; i < end; i++) {
-        float sum = 0.0f;
-        for (int j = 0; j < a->n; j++) sum += a->w[(size_t)i * a->n + j] * a->x[j];
-        a->out[i] = sum;
-    }
+    for (int i = begin; i < end; i++) a->out[i] = dot(a->w + (size_t)i * a->n, a->x, a->n);
 }
 
 // out = w[d, n] @ x[n], each thread computing a slice of the rows
@@ -181,12 +199,7 @@ static void attention_head(Model *m, int layer, int h, int pos) {
     const float *q = m->q + h * hd, *k_cache = m->k_cache + base, *v_cache = m->v_cache + base;
     float *scores = m->scores + (size_t)h * c->seq_len, *out = m->att + h * hd;
     float scale = 1.0f / sqrtf((float)hd);
-    for (int t = 0; t <= pos; t++) {
-        const float *k = k_cache + (size_t)t * kv_dim;
-        float dot = 0.0f;
-        for (int i = 0; i < hd; i++) dot += q[i] * k[i];
-        scores[t] = dot * scale;
-    }
+    for (int t = 0; t <= pos; t++) scores[t] = dot(q, k_cache + (size_t)t * kv_dim, hd) * scale;
     softmax(scores, pos + 1);
     memset(out, 0, hd * sizeof(float));
     for (int t = 0; t <= pos; t++) {
