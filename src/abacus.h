@@ -2,6 +2,7 @@
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 typedef struct {
     int dim;        // residual stream width (1024 for Qwen3-0.6B)
@@ -33,19 +34,35 @@ typedef struct {
 } Tokenizer;
 
 typedef uint16_t bf16; // bfloat16: the top 16 bits of a float32
+typedef _Float16 f16;
+
+static inline float bf16_to_f32(bf16 h) {
+    uint32_t bits = (uint32_t)h << 16;
+    float f;
+    memcpy(&f, &bits, sizeof f);
+    return f;
+}
+
+// int8 weights in blocks of 32 along each row, one f16 scale per block: the
+// numbers of llama.cpp's Q8_0, with values and scales in separate arrays.
+typedef struct {
+    int8_t *q; // [rows, cols]
+    f16 *d;    // [rows, cols / 32]
+    int rows, cols;
+} QMatrix;
 
 typedef struct {
     float *attn_norm, *q_norm, *k_norm, *ffn_norm; // RMSNorm weights
-    const bf16 *wq, *wk, *wv, *wo;                 // attention projections, [out, in]
-    const bf16 *w_gate, *w_up, *w_down;            // SwiGLU MLP
+    QMatrix wq, wk, wv, wo;                        // attention projections, [out, in]
+    QMatrix w_gate, w_up, w_down;                  // SwiGLU MLP
 } Layer;
 
 typedef struct {
     Config c;
     Tokenizer tok;
-    const bf16 *embed;   // [vocab, dim] token embeddings
-    const bf16 *lm_head; // [vocab, dim], the same tensor as embed when tied
-    float *norm;         // final RMSNorm
+    const bf16 *embed; // [vocab, dim] token embeddings
+    QMatrix lm_head;   // [vocab, dim], a quantized copy of embed when tied
+    float *norm;       // final RMSNorm
     Layer *layers;
     // activations for the token being processed
     float *x, *xn, *q, *k, *v, *att, *scores, *gate, *up;
@@ -61,6 +78,9 @@ void forward(Model *m, const int *tokens, int n, int pos, float *logits, int n_l
 int tokenizer_encode(const Tokenizer *t, const char *text, int *out, int max);
 const char *tokenizer_piece(const Tokenizer *t, int id, int *len);
 int tokenizer_is_special(const Tokenizer *t, int id);
+
+QMatrix quantize_matrix(const bf16 *w, int rows, int cols);
+void matmul(float *out, const float *x, const QMatrix *w); // out = w @ x
 
 // Thread pool: run fn(arg, i, n) on each of n threads and wait for all of them.
 typedef void (*Task)(void *arg, int thread, int n_threads);
