@@ -9,7 +9,7 @@ MODEL_DIR ?= models/Qwen3-0.6B
 HF = https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main
 
 abacus: src/*.c src/*.h
-	$(CC) $(CFLAGS) $(ARCH) -std=c11 -D_GNU_SOURCE -Wall -Wextra -o $@ src/*.c -lm
+	$(CC) $(CFLAGS) $(ARCH) -std=c11 -D_GNU_SOURCE -pthread -Wall -Wextra -o $@ src/*.c -lm
 
 # Download Qwen3-0.6B (1.5 GB) and convert it.
 model.bin:

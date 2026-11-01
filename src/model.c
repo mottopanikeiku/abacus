@@ -115,13 +115,26 @@ void model_free(Model *m) {
 
 // ---------------------------------------------------------------- math
 
-// out = w[d, n] @ x[n]
-static void matmul(float *out, const float *x, const float *w, int n, int d) {
-    for (int i = 0; i < d; i++) {
+typedef struct {
+    float *out;
+    const float *x, *w;
+    int n, d;
+} Matmul;
+
+static void matmul_rows(void *arg, int thread, int n_threads) {
+    const Matmul *a = arg;
+    int begin = (int)((long)a->d * thread / n_threads), end = (int)((long)a->d * (thread + 1) / n_threads);
+    for (int i = begin; i < end; i++) {
         float sum = 0.0f;
-        for (int j = 0; j < n; j++) sum += w[(size_t)i * n + j] * x[j];
-        out[i] = sum;
+        for (int j = 0; j < a->n; j++) sum += a->w[(size_t)i * a->n + j] * a->x[j];
+        a->out[i] = sum;
     }
+}
+
+// out = w[d, n] @ x[n], each thread computing a slice of the rows
+static void matmul(float *out, const float *x, const float *w, int n, int d) {
+    Matmul a = {out, x, w, n, d};
+    pool_run(matmul_rows, &a);
 }
 
 static void rmsnorm(float *out, const float *x, const float *w, int n, float eps) {
@@ -182,6 +195,18 @@ static void attention_head(Model *m, int layer, int h, int pos) {
     }
 }
 
+typedef struct {
+    Model *m;
+    int layer, pos;
+} Attention;
+
+static void attention_heads(void *arg, int thread, int n_threads) {
+    const Attention *a = arg;
+    int heads = a->m->c.n_heads;
+    for (int h = heads * thread / n_threads; h < heads * (thread + 1) / n_threads; h++)
+        attention_head(a->m, a->layer, h, a->pos);
+}
+
 static void forward_token(Model *m, int token, int pos) {
     const Config *c = &m->c;
     int dim = c->dim, hd = c->head_dim;
@@ -205,7 +230,8 @@ static void forward_token(Model *m, int token, int pos) {
         float *v_cache = m->v_cache + (size_t)l * c->seq_len * kv_dim;
         memcpy(k_cache + (size_t)pos * kv_dim, m->k, kv_dim * sizeof(float));
         memcpy(v_cache + (size_t)pos * kv_dim, m->v, kv_dim * sizeof(float));
-        for (int h = 0; h < c->n_heads; h++) attention_head(m, l, h, pos);
+        Attention att = {m, l, pos};
+        pool_run(attention_heads, &att);
         matmul(xn, m->att, L->wo, q_dim, dim);
         for (int i = 0; i < dim; i++) x[i] += xn[i];
 

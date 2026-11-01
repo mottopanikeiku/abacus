@@ -59,3 +59,10 @@ void forward(Model *m, const int *tokens, int n, int pos, float *logits, int n_l
 int tokenizer_encode(const Tokenizer *t, const char *text, int *out, int max);
 const char *tokenizer_piece(const Tokenizer *t, int id, int *len);
 int tokenizer_is_special(const Tokenizer *t, int id);
+
+// Thread pool: run fn(arg, i, n) on each of n threads and wait for all of them.
+typedef void (*Task)(void *arg, int thread, int n_threads);
+void pool_start(int n_threads);
+void pool_run(Task fn, void *arg);
+int pool_size(void);
+int default_threads(void); // CPUs this process may run on

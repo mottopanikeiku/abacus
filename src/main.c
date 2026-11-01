@@ -10,6 +10,7 @@ static const char *usage =
     "usage: abacus MODEL [options]\n"
     "  -p TEXT          prompt, wrapped in the chat template (default: a question)\n"
     "  -n N             tokens to generate (default 512)\n"
+    "  -t N             threads (default: every CPU this process may use)\n"
     "  --temp T         sampling temperature, 0 = greedy (default 0.7)\n"
     "  --seed S         sampling seed\n"
     "  --raw            continue the prompt as plain text, no chat template\n"
@@ -75,8 +76,8 @@ static void bench(Model *m, int pp, int tg) {
         token = argmax(logits, vocab);
     }
     double t2 = now();
-    printf("{\"prefill_tok_s\": %.3f, \"decode_tok_s\": %.3f, \"pp\": %d, \"tg\": %d, \"threads\": 1}\n",
-           pp / (t1 - t0), tg / (t2 - t1), pp, tg);
+    printf("{\"prefill_tok_s\": %.3f, \"decode_tok_s\": %.3f, \"pp\": %d, \"tg\": %d, \"threads\": %d}\n",
+           pp / (t1 - t0), tg / (t2 - t1), pp, tg, pool_size());
 }
 
 // Teacher forcing: run the given ids and write the logits that predict ids[from..].
@@ -105,7 +106,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     const char *prompt = "Why is the ocean salty?", *ids_arg = NULL, *dump = NULL, *text = NULL;
-    int steps = 512, raw = 0, info = 0, from = 1, chunk = 0, pp = 0, tg = 0;
+    int steps = 512, raw = 0, info = 0, from = 1, chunk = 0, pp = 0, tg = 0, threads = default_threads();
     float temp = 0.7f;
     uint64_t seed = (uint64_t)time(NULL);
     for (int i = 2; i < argc; i++) {
@@ -113,6 +114,7 @@ int main(int argc, char **argv) {
         int more = i + 1 < argc;
         if (!strcmp(a, "-p") && more) prompt = argv[++i];
         else if (!strcmp(a, "-n") && more) steps = atoi(argv[++i]);
+        else if (!strcmp(a, "-t") && more) threads = atoi(argv[++i]);
         else if (!strcmp(a, "--temp") && more) temp = (float)atof(argv[++i]);
         else if (!strcmp(a, "--seed") && more) seed = strtoull(argv[++i], NULL, 10);
         else if (!strcmp(a, "--raw")) raw = 1;
@@ -130,6 +132,7 @@ int main(int argc, char **argv) {
     }
 
     Model *m = model_load(argv[1]);
+    pool_start(threads);
     const Config *c = &m->c;
     int vocab = c->vocab_size;
     int *tokens = malloc(c->seq_len * sizeof(int));
