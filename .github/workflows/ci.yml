@@ -1,0 +1,18 @@
+name: ci
+on: [push, pull_request]
+
+jobs:
+  check:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04-arm, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: make
+      # a 2-layer random Qwen3 with the real tokenizer, checked against transformers
+      - run: uv run tools/tiny.py tiny
+      - run: python3 tools/export.py tiny tiny.bin
+      - run: uv run tools/reference.py tiny ref-tiny
+      - run: uv run tools/check.py ./abacus tiny.bin ref-tiny

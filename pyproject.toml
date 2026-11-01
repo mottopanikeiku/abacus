@@ -1,0 +1,22 @@
+[project]
+name = "abacus-tools"
+version = "0.1.0"
+description = "Model export, reference check and benchmark tools for abacus"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26",
+    "torch>=2.4",
+    "transformers>=4.51",
+    "matplotlib>=3.8",
+]
+
+[tool.uv]
+package = false
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
