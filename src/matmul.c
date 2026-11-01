@@ -66,33 +66,88 @@ static float dot_q8(const int8_t *w, const f16 *wd, const int8_t *x, const float
     return sum;
 }
 
+#ifdef __ARM_FEATURE_DOTPROD
+// Two weight rows times four tokens: eight dot products that share every
+// load, so each weight byte brought in from memory is used four times.
+static void tile_2x4(float *out, int ldo, const QMatrix *w, int row, const int8_t *x, const float *xd) {
+    int cols = w->cols, blocks = cols / BLOCK;
+    const int8_t *wq = w->q + (size_t)row * cols;
+    const f16 *wd = w->d + (size_t)row * blocks;
+    float32x4_t acc[2][4];
+    for (int r = 0; r < 2; r++)
+        for (int t = 0; t < 4; t++) acc[r][t] = vdupq_n_f32(0.0f);
+    for (int b = 0; b < blocks; b++) {
+        int8x16_t wl[2], wh[2], xl[4], xh[4];
+        float ws[2], xs[4];
+        for (int r = 0; r < 2; r++) {
+            wl[r] = vld1q_s8(wq + (size_t)r * cols + b * BLOCK);
+            wh[r] = vld1q_s8(wq + (size_t)r * cols + b * BLOCK + 16);
+            ws[r] = (float)wd[r * blocks + b];
+        }
+        for (int t = 0; t < 4; t++) {
+            xl[t] = vld1q_s8(x + (size_t)t * cols + b * BLOCK);
+            xh[t] = vld1q_s8(x + (size_t)t * cols + b * BLOCK + 16);
+            xs[t] = xd[t * blocks + b];
+        }
+        for (int r = 0; r < 2; r++)
+            for (int t = 0; t < 4; t++) {
+                int32x4_t s = vdotq_s32(vdotq_s32(vdupq_n_s32(0), wl[r], xl[t]), wh[r], xh[t]);
+                acc[r][t] = vfmaq_n_f32(acc[r][t], vcvtq_f32_s32(s), ws[r] * xs[t]);
+            }
+    }
+    for (int r = 0; r < 2; r++)
+        for (int t = 0; t < 4; t++) out[(size_t)t * ldo + row + r] = vaddvq_f32(acc[r][t]);
+}
+#endif
+
 typedef struct {
-    float *out;
+    float *out;     // [n, rows]
+    const float *x; // [n, cols]
     const QMatrix *w;
-    const int8_t *xq;
-    const float *xd;
+    int8_t *xq; // x quantized
+    float *xd;
+    int n;
 } Matmul;
+
+static void quantize_rows(void *arg, int thread, int n_threads) {
+    const Matmul *a = arg;
+    int cols = a->w->cols;
+    for (int t = a->n * thread / n_threads; t < a->n * (thread + 1) / n_threads; t++)
+        quantize_vector(a->xq + (size_t)t * cols, a->xd + (size_t)t * (cols / BLOCK), a->x + (size_t)t * cols, cols);
+}
 
 static void matmul_rows(void *arg, int thread, int n_threads) {
     const Matmul *a = arg;
     const QMatrix *w = a->w;
-    int blocks = w->cols / BLOCK;
-    int begin = (int)((long)w->rows * thread / n_threads), end = (int)((long)w->rows * (thread + 1) / n_threads);
-    for (int i = begin; i < end; i++)
-        a->out[i] = dot_q8(w->q + (size_t)i * w->cols, w->d + (size_t)i * blocks, a->xq, a->xd, blocks);
+    int cols = w->cols, blocks = cols / BLOCK, pairs = w->rows / 2;
+    // slices start on even rows so that 2-row tiles never straddle two threads
+    int begin = 2 * (int)((long)pairs * thread / n_threads);
+    int end = thread == n_threads - 1 ? w->rows : 2 * (int)((long)pairs * (thread + 1) / n_threads);
+    for (int r = begin; r < end; r += 2) {
+        int t = 0;
+#ifdef __ARM_FEATURE_DOTPROD
+        for (; r + 2 <= end && t + 4 <= a->n; t += 4)
+            tile_2x4(a->out + (size_t)t * w->rows, w->rows, w, r, a->xq + (size_t)t * cols, a->xd + (size_t)t * blocks);
+#endif
+        for (; t < a->n; t++)
+            for (int i = r; i < r + 2 && i < end; i++)
+                a->out[(size_t)t * w->rows + i] = dot_q8(w->q + (size_t)i * cols, w->d + (size_t)i * blocks,
+                                                         a->xq + (size_t)t * cols, a->xd + (size_t)t * blocks, blocks);
+    }
 }
 
-// out = w @ x, each thread computing a slice of the rows
-void matmul(float *out, const float *x, const QMatrix *w) {
+// out[n, rows] = x[n, cols] @ w^T, each thread computing a slice of the rows
+void matmul(float *out, const float *x, int n, const QMatrix *w) {
     static int8_t *xq;
     static float *xd;
-    static int capacity;
-    if (w->cols > capacity) {
-        capacity = w->cols;
+    static size_t capacity;
+    if ((size_t)n * w->cols > capacity) {
+        capacity = (size_t)n * w->cols;
         xq = realloc(xq, capacity);
         xd = realloc(xd, capacity / BLOCK * sizeof(float));
     }
-    quantize_vector(xq, xd, x, w->cols);
-    Matmul a = {out, w, xq, xd};
+    Matmul a = {out, x, w, xq, xd, n};
+    if (n > 1) pool_run(quantize_rows, &a);
+    else quantize_rows(&a, 0, 1);
     pool_run(matmul_rows, &a);
 }

@@ -64,8 +64,8 @@ typedef struct {
     QMatrix lm_head;   // [vocab, dim], a quantized copy of embed when tied
     float *norm;       // final RMSNorm
     Layer *layers;
-    // activations for the token being processed
-    float *x, *xn, *q, *k, *v, *att, *scores, *gate, *up;
+    // activations for a batch of up to BATCH tokens, one row per token
+    float *x, *xn, *q, *k, *v, *att, *gate, *up;
     float *k_cache, *v_cache; // [layer][position][n_kv_heads * head_dim]
 } Model;
 
@@ -80,7 +80,7 @@ const char *tokenizer_piece(const Tokenizer *t, int id, int *len);
 int tokenizer_is_special(const Tokenizer *t, int id);
 
 QMatrix quantize_matrix(const bf16 *w, int rows, int cols);
-void matmul(float *out, const float *x, const QMatrix *w); // out = w @ x
+void matmul(float *out, const float *x, int n, const QMatrix *w); // out[n, rows] = x[n, cols] @ w^T
 
 // Thread pool: run fn(arg, i, n) on each of n threads and wait for all of them.
 typedef void (*Task)(void *arg, int thread, int n_threads);

@@ -13,6 +13,7 @@
 #endif
 
 #define MAX_SEQ 4096
+#define BATCH 128 // prompt tokens processed together
 
 const uint8_t *tokenizer_load(Tokenizer *t, const uint8_t *p);
 
@@ -101,15 +102,14 @@ Model *model_load(const char *path) {
     m->lm_head = tied ? quantize_matrix(m->embed, c->vocab_size, dim) : read_matrix(&r, c->vocab_size, dim);
     if (r.off > (size_t)st.st_size) die("model file is truncated");
 
-    m->x = xcalloc(dim, sizeof(float));
-    m->xn = xcalloc(dim, sizeof(float));
-    m->q = xcalloc(q_dim, sizeof(float));
-    m->k = xcalloc(kv_dim, sizeof(float));
-    m->v = xcalloc(kv_dim, sizeof(float));
-    m->att = xcalloc(q_dim, sizeof(float));
-    m->scores = xcalloc((size_t)c->n_heads * c->seq_len, sizeof(float));
-    m->gate = xcalloc(c->hidden_dim, sizeof(float));
-    m->up = xcalloc(c->hidden_dim, sizeof(float));
+    m->x = xcalloc((size_t)BATCH * dim, sizeof(float));
+    m->xn = xcalloc((size_t)BATCH * dim, sizeof(float));
+    m->q = xcalloc((size_t)BATCH * q_dim, sizeof(float));
+    m->k = xcalloc((size_t)BATCH * kv_dim, sizeof(float));
+    m->v = xcalloc((size_t)BATCH * kv_dim, sizeof(float));
+    m->att = xcalloc((size_t)BATCH * q_dim, sizeof(float));
+    m->gate = xcalloc((size_t)BATCH * c->hidden_dim, sizeof(float));
+    m->up = xcalloc((size_t)BATCH * c->hidden_dim, sizeof(float));
     m->k_cache = xcalloc((size_t)c->n_layers * c->seq_len * kv_dim, sizeof(float));
     m->v_cache = xcalloc((size_t)c->n_layers * c->seq_len * kv_dim, sizeof(float));
     return m;
@@ -177,14 +177,14 @@ static void softmax(float *x, int n) {
 
 // ---------------------------------------------------------------- transformer
 
-// Query head h attends over cache positions 0..pos; writes its slice of m->att.
-static void attention_head(Model *m, int layer, int h, int pos) {
+// Query head h of the token at position pos attends over cache positions 0..pos.
+static void attention_head(const Model *m, int layer, const float *q, float *out, int h, int pos) {
     const Config *c = &m->c;
     int hd = c->head_dim, kv_dim = c->n_kv_heads * hd;
     size_t base = (size_t)layer * c->seq_len * kv_dim + (size_t)(h / (c->n_heads / c->n_kv_heads)) * hd;
-    const float *q = m->q + h * hd, *k_cache = m->k_cache + base, *v_cache = m->v_cache + base;
-    float *scores = m->scores + (size_t)h * c->seq_len, *out = m->att + h * hd;
-    float scale = 1.0f / sqrtf((float)hd);
+    const float *k_cache = m->k_cache + base, *v_cache = m->v_cache + base;
+    float scores[MAX_SEQ], scale = 1.0f / sqrtf((float)hd);
+    q += h * hd, out += h * hd;
     for (int t = 0; t <= pos; t++) scores[t] = dot(q, k_cache + (size_t)t * kv_dim, hd) * scale;
     softmax(scores, pos + 1);
     memset(out, 0, hd * sizeof(float));
@@ -195,64 +195,78 @@ static void attention_head(Model *m, int layer, int h, int pos) {
 }
 
 typedef struct {
-    Model *m;
-    int layer, pos;
+    const Model *m;
+    int layer, pos, n;
 } Attention;
 
-static void attention_heads(void *arg, int thread, int n_threads) {
+// Every (token, head) pair in the batch is an independent job.
+static void attention_jobs(void *arg, int thread, int n_threads) {
     const Attention *a = arg;
-    int heads = a->m->c.n_heads;
-    for (int h = heads * thread / n_threads; h < heads * (thread + 1) / n_threads; h++)
-        attention_head(a->m, a->layer, h, a->pos);
+    const Config *c = &a->m->c;
+    int q_dim = c->n_heads * c->head_dim, jobs = a->n * c->n_heads;
+    for (int j = jobs * thread / n_threads; j < jobs * (thread + 1) / n_threads; j++) {
+        int i = j / c->n_heads, h = j % c->n_heads;
+        attention_head(a->m, a->layer, a->m->q + (size_t)i * q_dim, a->m->att + (size_t)i * q_dim, h, a->pos + i);
+    }
 }
 
-static void forward_token(Model *m, int token, int pos) {
+// Runs n <= BATCH tokens through every layer at once, so each weight is read
+// once per batch instead of once per token. Leaves the final hidden states in m->x.
+static void forward_batch(Model *m, const int *tokens, int n, int pos) {
     const Config *c = &m->c;
-    int dim = c->dim, hd = c->head_dim, kv_dim = c->n_kv_heads * hd;
+    int dim = c->dim, hd = c->head_dim, hidden = c->hidden_dim;
+    int q_dim = c->n_heads * hd, kv_dim = c->n_kv_heads * hd;
     float *x = m->x, *xn = m->xn;
 
-    for (int i = 0; i < dim; i++) x[i] = bf16_to_f32(m->embed[(size_t)token * dim + i]);
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j < dim; j++) x[(size_t)i * dim + j] = bf16_to_f32(m->embed[(size_t)tokens[i] * dim + j]);
     for (int l = 0; l < c->n_layers; l++) {
         const Layer *L = &m->layers[l];
 
         // attention: project, normalize each head, rotate, append to the cache
-        rmsnorm(xn, x, L->attn_norm, dim, c->norm_eps);
-        matmul(m->q, xn, &L->wq);
-        matmul(m->k, xn, &L->wk);
-        matmul(m->v, xn, &L->wv);
-        for (int h = 0; h < c->n_heads; h++) rmsnorm(m->q + h * hd, m->q + h * hd, L->q_norm, hd, c->norm_eps);
-        for (int h = 0; h < c->n_kv_heads; h++) rmsnorm(m->k + h * hd, m->k + h * hd, L->k_norm, hd, c->norm_eps);
-        rope(m->q, c->n_heads, hd, pos, c->rope_theta);
-        rope(m->k, c->n_kv_heads, hd, pos, c->rope_theta);
-        float *k_cache = m->k_cache + (size_t)l * c->seq_len * kv_dim;
-        float *v_cache = m->v_cache + (size_t)l * c->seq_len * kv_dim;
-        memcpy(k_cache + (size_t)pos * kv_dim, m->k, kv_dim * sizeof(float));
-        memcpy(v_cache + (size_t)pos * kv_dim, m->v, kv_dim * sizeof(float));
-        Attention att = {m, l, pos};
-        pool_run(attention_heads, &att);
-        matmul(xn, m->att, &L->wo);
-        for (int i = 0; i < dim; i++) x[i] += xn[i];
+        for (int i = 0; i < n; i++) rmsnorm(xn + (size_t)i * dim, x + (size_t)i * dim, L->attn_norm, dim, c->norm_eps);
+        matmul(m->q, xn, n, &L->wq);
+        matmul(m->k, xn, n, &L->wk);
+        matmul(m->v, xn, n, &L->wv);
+        for (int i = 0; i < n; i++) {
+            float *q = m->q + (size_t)i * q_dim, *k = m->k + (size_t)i * kv_dim;
+            for (int h = 0; h < c->n_heads; h++) rmsnorm(q + h * hd, q + h * hd, L->q_norm, hd, c->norm_eps);
+            for (int h = 0; h < c->n_kv_heads; h++) rmsnorm(k + h * hd, k + h * hd, L->k_norm, hd, c->norm_eps);
+            rope(q, c->n_heads, hd, pos + i, c->rope_theta);
+            rope(k, c->n_kv_heads, hd, pos + i, c->rope_theta);
+        }
+        size_t at = ((size_t)l * c->seq_len + pos) * kv_dim;
+        memcpy(m->k_cache + at, m->k, (size_t)n * kv_dim * sizeof(float));
+        memcpy(m->v_cache + at, m->v, (size_t)n * kv_dim * sizeof(float));
+        Attention att = {m, l, pos, n};
+        pool_run(attention_jobs, &att);
+        matmul(xn, m->att, n, &L->wo);
+        for (size_t i = 0; i < (size_t)n * dim; i++) x[i] += xn[i];
 
         // MLP: down(silu(gate(x)) * up(x))
-        rmsnorm(xn, x, L->ffn_norm, dim, c->norm_eps);
-        matmul(m->gate, xn, &L->w_gate);
-        matmul(m->up, xn, &L->w_up);
-        for (int i = 0; i < c->hidden_dim; i++) {
+        for (int i = 0; i < n; i++) rmsnorm(xn + (size_t)i * dim, x + (size_t)i * dim, L->ffn_norm, dim, c->norm_eps);
+        matmul(m->gate, xn, n, &L->w_gate);
+        matmul(m->up, xn, n, &L->w_up);
+        for (size_t i = 0; i < (size_t)n * hidden; i++) {
             float g = m->gate[i];
             m->gate[i] = g / (1.0f + expf(-g)) * m->up[i];
         }
-        matmul(xn, m->gate, &L->w_down);
-        for (int i = 0; i < dim; i++) x[i] += xn[i];
+        matmul(xn, m->gate, n, &L->w_down);
+        for (size_t i = 0; i < (size_t)n * dim; i++) x[i] += xn[i];
     }
-    rmsnorm(x, x, m->norm, dim, c->norm_eps);
+    for (int i = 0; i < n; i++) rmsnorm(x + (size_t)i * dim, x + (size_t)i * dim, m->norm, dim, c->norm_eps);
 }
 
 void forward(Model *m, const int *tokens, int n, int pos, float *logits, int n_logits) {
     const Config *c = &m->c;
     if (pos + n > c->seq_len) die("context is full");
-    for (int i = 0; i < n; i++) {
-        forward_token(m, tokens[i], pos + i);
-        int j = i - (n - n_logits);
-        if (j >= 0) matmul(logits + (size_t)j * c->vocab_size, m->x, &m->lm_head);
+    for (int start = 0; start < n; start += BATCH) {
+        int len = n - start < BATCH ? n - start : BATCH;
+        forward_batch(m, tokens + start, len, pos + start);
+        // logits for the rows of this batch that are among the last n_logits
+        int first = start > n - n_logits ? start : n - n_logits;
+        if (first < start + len)
+            matmul(logits + (size_t)(first - (n - n_logits)) * c->vocab_size, m->x + (size_t)(first - start) * c->dim,
+                   start + len - first, &m->lm_head);
     }
 }
