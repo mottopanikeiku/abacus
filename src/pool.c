@@ -1,30 +1,37 @@
 // A fixed team of threads. pool_run(fn, arg) calls fn(arg, i, n) once on each
 // of the n threads (the caller is thread 0) and returns when all are done.
+// A forward pass hands the team a few hundred small jobs per token, so idle
+// workers spin on a counter instead of sleeping: waking a sleeping thread
+// costs more than most of the jobs.
 #include "abacus.h"
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <unistd.h>
 #ifdef __linux__
 #include <sched.h>
 #endif
 
-static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t wake = PTHREAD_COND_INITIALIZER, finished = PTHREAD_COND_INITIALIZER;
 static Task task;
 static void *task_arg;
-static int n_threads = 1, generation, pending;
+static int n_threads = 1;
+static atomic_int generation, pending;
+
+static inline void cpu_relax(void) {
+#if defined(__aarch64__)
+    __asm__ volatile("yield");
+#elif defined(__x86_64__)
+    __asm__ volatile("pause");
+#endif
+}
 
 static void *worker(void *p) {
     int id = (int)(intptr_t)p, seen = 0;
     for (;;) {
-        pthread_mutex_lock(&lock);
-        while (generation == seen) pthread_cond_wait(&wake, &lock);
-        seen = generation;
-        pthread_mutex_unlock(&lock);
+        while (atomic_load_explicit(&generation, memory_order_acquire) == seen) cpu_relax();
+        seen++;
         task(task_arg, id, n_threads);
-        pthread_mutex_lock(&lock);
-        if (--pending == 0) pthread_cond_signal(&finished);
-        pthread_mutex_unlock(&lock);
+        atomic_fetch_sub_explicit(&pending, 1, memory_order_release);
     }
     return NULL;
 }
@@ -49,16 +56,9 @@ void pool_start(int n) {
 int pool_size(void) { return n_threads; }
 
 void pool_run(Task fn, void *arg) {
-    if (n_threads == 1) {
-        fn(arg, 0, 1);
-        return;
-    }
-    pthread_mutex_lock(&lock);
-    task = fn, task_arg = arg, pending = n_threads - 1, generation++;
-    pthread_cond_broadcast(&wake);
-    pthread_mutex_unlock(&lock);
+    task = fn, task_arg = arg;
+    atomic_store_explicit(&pending, n_threads - 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&generation, 1, memory_order_release);
     fn(arg, 0, n_threads);
-    pthread_mutex_lock(&lock);
-    while (pending) pthread_cond_wait(&finished, &lock);
-    pthread_mutex_unlock(&lock);
+    while (atomic_load_explicit(&pending, memory_order_acquire)) cpu_relax();
 }
