@@ -66,7 +66,7 @@ static float dot_q8(const int8_t *w, const f16 *wd, const int8_t *x, const float
     return sum;
 }
 
-#ifdef __ARM_FEATURE_DOTPROD
+#if defined(__ARM_FEATURE_DOTPROD) && !defined(__ARM_FEATURE_MATMUL_INT8)
 // Two weight rows times four tokens: eight dot products that share every
 // load, so each weight byte brought in from memory is used four times.
 static void tile_2x4(float *out, int ldo, const QMatrix *w, int row, const int8_t *x, const float *xd) {
@@ -100,6 +100,65 @@ static void tile_2x4(float *out, int ldo, const QMatrix *w, int row, const int8_
 }
 #endif
 
+#ifdef __ARM_FEATURE_MATMUL_INT8
+// SMMLA multiplies a 2x8 int8 matrix by the transpose of another 2x8 one and
+// adds the 2x2 int32 result: two rows times two tokens, eight deep, in one
+// instruction, twice the work of an SDOT. A 4x4 tile is four of them.
+static void tile_4x4(float *out, int ldo, const QMatrix *w, int row, const int8_t *x, const float *xd) {
+    int cols = w->cols, blocks = cols / BLOCK;
+    const int8_t *wq = w->q + (size_t)row * cols;
+    const f16 *wd = w->d + (size_t)row * blocks;
+    float32x4_t acc[2][2]; // [row pair][token pair], lanes (r0,t0) (r0,t1) (r1,t0) (r1,t1)
+    for (int p = 0; p < 2; p++)
+        for (int q = 0; q < 2; q++) acc[p][q] = vdupq_n_f32(0.0f);
+    for (int b = 0; b < blocks; b++) {
+        int32x4_t s[2][2];
+        for (int p = 0; p < 2; p++)
+            for (int q = 0; q < 2; q++) s[p][q] = vdupq_n_s32(0);
+        for (int k = b * BLOCK; k < (b + 1) * BLOCK; k += 16) {
+            // pair up rows: lo holds bytes 0-7 of both rows, hi bytes 8-15
+            int8x16_t w_lo[2], w_hi[2], x_lo[2], x_hi[2];
+            for (int p = 0; p < 2; p++) {
+                int64x2_t r0 = vreinterpretq_s64_s8(vld1q_s8(wq + (size_t)(2 * p) * cols + k));
+                int64x2_t r1 = vreinterpretq_s64_s8(vld1q_s8(wq + (size_t)(2 * p + 1) * cols + k));
+                w_lo[p] = vreinterpretq_s8_s64(vzip1q_s64(r0, r1));
+                w_hi[p] = vreinterpretq_s8_s64(vzip2q_s64(r0, r1));
+                int64x2_t t0 = vreinterpretq_s64_s8(vld1q_s8(x + (size_t)(2 * p) * cols + k));
+                int64x2_t t1 = vreinterpretq_s64_s8(vld1q_s8(x + (size_t)(2 * p + 1) * cols + k));
+                x_lo[p] = vreinterpretq_s8_s64(vzip1q_s64(t0, t1));
+                x_hi[p] = vreinterpretq_s8_s64(vzip2q_s64(t0, t1));
+            }
+            for (int p = 0; p < 2; p++)
+                for (int q = 0; q < 2; q++) s[p][q] = vmmlaq_s32(vmmlaq_s32(s[p][q], w_lo[p], x_lo[q]), w_hi[p], x_hi[q]);
+        }
+        for (int p = 0; p < 2; p++) {
+            float32x4_t ws = vcombine_f32(vdup_n_f32((float)wd[2 * p * blocks + b]),
+                                          vdup_n_f32((float)wd[(2 * p + 1) * blocks + b]));
+            for (int q = 0; q < 2; q++) {
+                float32x2_t xs = {xd[2 * q * blocks + b], xd[(2 * q + 1) * blocks + b]};
+                acc[p][q] = vfmaq_f32(acc[p][q], vcvtq_f32_s32(s[p][q]), vmulq_f32(ws, vcombine_f32(xs, xs)));
+            }
+        }
+    }
+    for (int p = 0; p < 2; p++)
+        for (int q = 0; q < 2; q++) {
+            float v[4];
+            vst1q_f32(v, acc[p][q]);
+            out[(size_t)(2 * q) * ldo + row + 2 * p] = v[0];
+            out[(size_t)(2 * q + 1) * ldo + row + 2 * p] = v[1];
+            out[(size_t)(2 * q) * ldo + row + 2 * p + 1] = v[2];
+            out[(size_t)(2 * q + 1) * ldo + row + 2 * p + 1] = v[3];
+        }
+}
+#define TILE_ROWS 4
+#define tile tile_4x4
+#elif defined(__ARM_FEATURE_DOTPROD)
+#define TILE_ROWS 2
+#define tile tile_2x4
+#else
+#define TILE_ROWS 1
+#endif
+
 typedef struct {
     float *out;     // [n, rows]
     const float *x; // [n, cols]
@@ -119,18 +178,18 @@ static void quantize_rows(void *arg, int thread, int n_threads) {
 static void matmul_rows(void *arg, int thread, int n_threads) {
     const Matmul *a = arg;
     const QMatrix *w = a->w;
-    int cols = w->cols, blocks = cols / BLOCK, pairs = w->rows / 2;
-    // slices start on even rows so that 2-row tiles never straddle two threads
-    int begin = 2 * (int)((long)pairs * thread / n_threads);
-    int end = thread == n_threads - 1 ? w->rows : 2 * (int)((long)pairs * (thread + 1) / n_threads);
-    for (int r = begin; r < end; r += 2) {
+    int cols = w->cols, blocks = cols / BLOCK, groups = w->rows / TILE_ROWS;
+    // slices start on a tile boundary so that tiles never straddle two threads
+    int begin = TILE_ROWS * (int)((long)groups * thread / n_threads);
+    int end = thread == n_threads - 1 ? w->rows : TILE_ROWS * (int)((long)groups * (thread + 1) / n_threads);
+    for (int r = begin; r < end; r += TILE_ROWS) {
         int t = 0;
-#ifdef __ARM_FEATURE_DOTPROD
-        for (; r + 2 <= end && t + 4 <= a->n; t += 4)
-            tile_2x4(a->out + (size_t)t * w->rows, w->rows, w, r, a->xq + (size_t)t * cols, a->xd + (size_t)t * blocks);
+#if TILE_ROWS > 1
+        for (; r + TILE_ROWS <= end && t + 4 <= a->n; t += 4)
+            tile(a->out + (size_t)t * w->rows, w->rows, w, r, a->xq + (size_t)t * cols, a->xd + (size_t)t * blocks);
 #endif
         for (; t < a->n; t++)
-            for (int i = r; i < r + 2 && i < end; i++)
+            for (int i = r; i < r + TILE_ROWS && i < end; i++)
                 a->out[(size_t)t * w->rows + i] = dot_q8(w->q + (size_t)i * cols, w->d + (size_t)i * blocks,
                                                          a->xq + (size_t)t * cols, a->xd + (size_t)t * blocks, blocks);
     }
