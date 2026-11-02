@@ -33,7 +33,7 @@ jobs:
       - run: make ARCH=
       - run: uv run tools/tiny.py tiny && python3 tools/export.py tiny tiny.bin && uv run tools/reference.py tiny ref-tiny
       - run: |
-          for cpu in snb hsw; do
+          for cpu in snb hsw adl icx; do
             printf '#!/bin/sh\nexec "%s/sde64" -%s -- ./abacus "$@"\n' "$SDE_PATH" $cpu > sde-abacus
             chmod +x sde-abacus
             ./sde-abacus tiny.bin --info
