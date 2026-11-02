@@ -1,8 +1,8 @@
-// NEON kernels for arm64: SDOT (dotprod) for one token, SMMLA (i8mm) for
-// four. Both read the 4-row groups described in matmul.c. Each function turns
-// its extension on for itself, so any arm64 build has them, and cpu_kernels
-// asks the OS which ones this CPU runs: Apple M1 and Graviton2 have SDOT but
-// not SMMLA.
+// NEON kernels for arm64: SDOT (dotprod) for one token, and SMMLA (i8mm) for
+// four, or SDOT again for four on CPUs without i8mm. All of them read the
+// 4-row groups described in matmul.c. Each function turns its extension on
+// for itself, so any arm64 build has them, and cpu_kernels asks the OS which
+// ones this CPU runs: Apple M1 and Graviton2 have SDOT but not SMMLA.
 #ifdef __aarch64__
 #include "abacus.h"
 #include <arm_neon.h>
@@ -57,6 +57,45 @@ DOTPROD static inline __attribute__((always_inline)) void x1(float *out, const Q
 DOTPROD static void x1_sdot(float *out, const QMatrix *m, int g, const int8_t *x, const float *xd) {
     if (m->bits == 4) x1(out, m, g, x, xd, 4);
     else x1(out, m, g, x, xd, 8);
+}
+
+// Two groups (8 rows) times four tokens with SDOT, for CPUs without SMMLA. A
+// token costs the same SDOTs as in x1, but each register of weights is loaded
+// (and, at 4 bits, unpacked) once for all four tokens, and the two lanes of
+// each row are added as integers before the scales come in.
+DOTPROD static inline __attribute__((always_inline)) void sdot4(float *out, int ldo, const QMatrix *m, int g,
+                                                                const int8_t *x, const float *xd, int bits) {
+    int blocks = m->cols / BLOCK, cols = m->cols, bytes = 16 * bits;
+    for (int h = 0; h < 2; h++, out += 4) {
+        const int8_t *q = m->q + (size_t)(g + h) * blocks * bytes;
+        const f16 *d = m->d + (size_t)(g + h) * blocks * 4;
+        float32x4_t acc[4];
+        for (int t = 0; t < 4; t++) acc[t] = vdupq_n_f32(0.0f);
+        for (int b = 0; b < blocks; b++, q += bytes, d += 4) {
+            int32x4_t s01[4], s23[4]; // lanes (row 0, row 0, row 1, row 1) and the same for rows 2, 3
+            for (int t = 0; t < 4; t++) s01[t] = s23[t] = vdupq_n_s32(0);
+            for (int c = 0; c < 4; c++) {
+                int8x16_t w01 = weights(q, bits, 2 * c), w23 = weights(q, bits, 2 * c + 1);
+                for (int t = 0; t < 4; t++) {
+                    int8x8_t xc = vld1_s8(x + (size_t)t * cols + b * BLOCK + c * 8);
+                    int8x16_t xx = vcombine_s8(xc, xc);
+                    s01[t] = vdotq_s32(s01[t], w01, xx);
+                    s23[t] = vdotq_s32(s23[t], w23, xx);
+                }
+            }
+            float32x4_t rows = vcvt_f32_f16(vld1_f16((const float16_t *)d));
+            for (int t = 0; t < 4; t++)
+                acc[t] = vfmaq_f32(acc[t], vcvtq_f32_s32(vpaddq_s32(s01[t], s23[t])),
+                                   vmulq_n_f32(rows, xd[t * blocks + b]));
+        }
+        for (int t = 0; t < 4; t++)
+            vst1q_f32(out + (size_t)t * ldo, bits == 4 ? vmulq_n_f32(acc[t], 1.0f / 16) : acc[t]);
+    }
+}
+
+DOTPROD static void x4_sdot(float *out, int ldo, const QMatrix *m, int g, const int8_t *x, const float *xd) {
+    if (m->bits == 4) sdot4(out, ldo, m, g, x, xd, 4);
+    else sdot4(out, ldo, m, g, x, xd, 8);
 }
 
 // Two groups (8 rows) times four tokens. SMMLA multiplies a 2x8 int8 matrix
@@ -133,7 +172,7 @@ void cpu_kernels(Kernels *k) {
 #else
     int dotprod = 0, i8mm = 0;
 #endif
-    if (dotprod) *k = (Kernels){"neon dotprod", x1_sdot, NULL};
+    if (dotprod) *k = (Kernels){"neon dotprod", x1_sdot, x4_sdot};
     if (dotprod && i8mm) *k = (Kernels){"neon i8mm", x1_sdot, x4_smmla};
 }
 #endif
