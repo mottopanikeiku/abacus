@@ -80,23 +80,23 @@ Model *model_load(const char *path) {
     memcpy(&m->tok.eos, data + 60, 4);
 
     Reader r = {data, tokenizer_load(&m->tok, data + 64) - data};
-    int dim = c->dim, hd = c->head_dim;
+    int dim = c->dim, hd = c->head_dim, hidden = c->hidden_dim;
     int q_dim = c->n_heads * hd, kv_dim = c->n_kv_heads * hd;
     m->embed = read_bf16(&r, (size_t)c->vocab_size * dim);
     m->layers = xcalloc(c->n_layers, sizeof(Layer));
     for (int l = 0; l < c->n_layers; l++) {
+        // q, k and v follow each other in the file with no padding (each is a
+        // multiple of 64 bytes), as do gate and up, so each set loads as one
+        // taller matrix: one product per set instead of three or two.
         Layer *L = &m->layers[l];
         L->attn_norm = read_f32(&r, dim);
-        L->wq = read_matrix(&r, q_dim, dim);
-        L->wk = read_matrix(&r, kv_dim, dim);
-        L->wv = read_matrix(&r, kv_dim, dim);
+        L->wqkv = read_matrix(&r, q_dim + 2 * kv_dim, dim);
         L->wo = read_matrix(&r, dim, q_dim);
         L->q_norm = read_f32(&r, hd);
         L->k_norm = read_f32(&r, hd);
         L->ffn_norm = read_f32(&r, dim);
-        L->w_gate = read_matrix(&r, c->hidden_dim, dim);
-        L->w_up = read_matrix(&r, c->hidden_dim, dim);
-        L->w_down = read_matrix(&r, dim, c->hidden_dim);
+        L->w_gate_up = read_matrix(&r, 2 * hidden, dim);
+        L->w_down = read_matrix(&r, dim, hidden);
     }
     m->norm = read_f32(&r, dim);
     m->lm_head = tied ? quantize_matrix(m->embed, c->vocab_size, dim) : read_matrix(&r, c->vocab_size, dim);
@@ -104,12 +104,10 @@ Model *model_load(const char *path) {
 
     m->x = xcalloc((size_t)BATCH * dim, sizeof(float));
     m->xn = xcalloc((size_t)BATCH * dim, sizeof(float));
-    m->q = xcalloc((size_t)BATCH * q_dim, sizeof(float));
-    m->k = xcalloc((size_t)BATCH * kv_dim, sizeof(float));
-    m->v = xcalloc((size_t)BATCH * kv_dim, sizeof(float));
+    m->qkv = xcalloc((size_t)BATCH * (q_dim + 2 * kv_dim), sizeof(float));
     m->att = xcalloc((size_t)BATCH * q_dim, sizeof(float));
-    m->gate = xcalloc((size_t)BATCH * c->hidden_dim, sizeof(float));
-    m->up = xcalloc((size_t)BATCH * c->hidden_dim, sizeof(float));
+    m->gate_up = xcalloc((size_t)BATCH * 2 * hidden, sizeof(float));
+    m->act = xcalloc((size_t)BATCH * hidden, sizeof(float));
     m->k_cache = xcalloc((size_t)c->n_layers * c->seq_len * kv_dim, sizeof(float));
     m->v_cache = xcalloc((size_t)c->n_layers * c->seq_len * kv_dim, sizeof(float));
     return m;
@@ -203,10 +201,11 @@ typedef struct {
 static void attention_jobs(void *arg, int thread, int n_threads) {
     const Attention *a = arg;
     const Config *c = &a->m->c;
-    int q_dim = c->n_heads * c->head_dim, jobs = a->n * c->n_heads;
+    int q_dim = c->n_heads * c->head_dim, qkv_dim = q_dim + 2 * c->n_kv_heads * c->head_dim;
+    int jobs = a->n * c->n_heads;
     for (int j = jobs * thread / n_threads; j < jobs * (thread + 1) / n_threads; j++) {
         int i = j / c->n_heads, h = j % c->n_heads;
-        attention_head(a->m, a->layer, a->m->q + (size_t)i * q_dim, a->m->att + (size_t)i * q_dim, h, a->pos + i);
+        attention_head(a->m, a->layer, a->m->qkv + (size_t)i * qkv_dim, a->m->att + (size_t)i * q_dim, h, a->pos + i);
     }
 }
 
@@ -215,7 +214,7 @@ static void attention_jobs(void *arg, int thread, int n_threads) {
 static void forward_batch(Model *m, const int *tokens, int n, int pos) {
     const Config *c = &m->c;
     int dim = c->dim, hd = c->head_dim, hidden = c->hidden_dim;
-    int q_dim = c->n_heads * hd, kv_dim = c->n_kv_heads * hd;
+    int q_dim = c->n_heads * hd, kv_dim = c->n_kv_heads * hd, qkv_dim = q_dim + 2 * kv_dim;
     float *x = m->x, *xn = m->xn;
 
     for (int i = 0; i < n; i++)
@@ -225,19 +224,17 @@ static void forward_batch(Model *m, const int *tokens, int n, int pos) {
 
         // attention: project, normalize each head, rotate, append to the cache
         for (int i = 0; i < n; i++) rmsnorm(xn + (size_t)i * dim, x + (size_t)i * dim, L->attn_norm, dim, c->norm_eps);
-        matmul(m->q, xn, n, &L->wq);
-        matmul(m->k, xn, n, &L->wk);
-        matmul(m->v, xn, n, &L->wv);
+        matmul(m->qkv, xn, n, &L->wqkv);
         for (int i = 0; i < n; i++) {
-            float *q = m->q + (size_t)i * q_dim, *k = m->k + (size_t)i * kv_dim;
+            float *q = m->qkv + (size_t)i * qkv_dim, *k = q + q_dim, *v = k + kv_dim;
             for (int h = 0; h < c->n_heads; h++) rmsnorm(q + h * hd, q + h * hd, L->q_norm, hd, c->norm_eps);
             for (int h = 0; h < c->n_kv_heads; h++) rmsnorm(k + h * hd, k + h * hd, L->k_norm, hd, c->norm_eps);
             rope(q, c->n_heads, hd, pos + i, c->rope_theta);
             rope(k, c->n_kv_heads, hd, pos + i, c->rope_theta);
+            size_t at = ((size_t)l * c->seq_len + pos + i) * kv_dim;
+            memcpy(m->k_cache + at, k, kv_dim * sizeof(float));
+            memcpy(m->v_cache + at, v, kv_dim * sizeof(float));
         }
-        size_t at = ((size_t)l * c->seq_len + pos) * kv_dim;
-        memcpy(m->k_cache + at, m->k, (size_t)n * kv_dim * sizeof(float));
-        memcpy(m->v_cache + at, m->v, (size_t)n * kv_dim * sizeof(float));
         Attention att = {m, l, pos, n};
         pool_run(attention_jobs, &att);
         matmul(xn, m->att, n, &L->wo);
@@ -245,13 +242,12 @@ static void forward_batch(Model *m, const int *tokens, int n, int pos) {
 
         // MLP: down(silu(gate(x)) * up(x))
         for (int i = 0; i < n; i++) rmsnorm(xn + (size_t)i * dim, x + (size_t)i * dim, L->ffn_norm, dim, c->norm_eps);
-        matmul(m->gate, xn, n, &L->w_gate);
-        matmul(m->up, xn, n, &L->w_up);
-        for (size_t i = 0; i < (size_t)n * hidden; i++) {
-            float g = m->gate[i];
-            m->gate[i] = g / (1.0f + expf(-g)) * m->up[i];
+        matmul(m->gate_up, xn, n, &L->w_gate_up);
+        for (int i = 0; i < n; i++) {
+            const float *gate = m->gate_up + (size_t)i * 2 * hidden, *up = gate + hidden;
+            for (int j = 0; j < hidden; j++) m->act[(size_t)i * hidden + j] = gate[j] / (1.0f + expf(-gate[j])) * up[j];
         }
-        matmul(xn, m->gate, n, &L->w_down);
+        matmul(xn, m->act, n, &L->w_down);
         for (size_t i = 0; i < (size_t)n * dim; i++) x[i] += xn[i];
     }
     for (int i = 0; i < n; i++) rmsnorm(x + (size_t)i * dim, x + (size_t)i * dim, m->norm, dim, c->norm_eps);

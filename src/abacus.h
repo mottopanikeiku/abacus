@@ -54,8 +54,8 @@ typedef struct {
 
 typedef struct {
     float *attn_norm, *q_norm, *k_norm, *ffn_norm; // RMSNorm weights
-    QMatrix wq, wk, wv, wo;                        // attention projections, [out, in]
-    QMatrix w_gate, w_up, w_down;                  // SwiGLU MLP
+    QMatrix wqkv, wo;                              // attention: q, k, v stacked; output
+    QMatrix w_gate_up, w_down;                     // SwiGLU MLP: gate and up stacked; down
 } Layer;
 
 typedef struct {
@@ -66,7 +66,7 @@ typedef struct {
     float *norm;       // final RMSNorm
     Layer *layers;
     // activations for a batch of up to BATCH tokens, one row per token
-    float *x, *xn, *q, *k, *v, *att, *gate, *up;
+    float *x, *xn, *qkv, *att, *gate_up, *act;
     float *k_cache, *v_cache; // [layer][position][n_kv_heads * head_dim]
 } Model;
 
