@@ -15,7 +15,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
-COLORS = {1: "#9aa5b1", 4: "#4c8bf5", 8: "#e8590c", 16: "#2b8a3e"}
+COLORS = {1: "#9aa5b1", 2: "#7048e8", 4: "#4c8bf5", 8: "#e8590c", 16: "#2b8a3e"}
 METRICS = [("decode_tok_s", "Decode"), ("prefill_tok_s", "Prefill")]
 
 
@@ -96,8 +96,9 @@ def main():
         for side in ("top", "right"):
             ax.spines[side].set_visible(False)
     axes[0].legend(frameon=False, fontsize=8, loc="lower right")
-    fig.suptitle("abacus commit by commit vs llama.cpp Q8_0 (dashed), Qwen3-0.6B on a 16-core Neoverse-V2",
-                 fontsize=12, x=0.01, ha="left")
+    cpu = json.loads((out / "machine.json").read_text())
+    fig.suptitle(f"abacus commit by commit vs llama.cpp Q8_0 (dashed), Qwen3-0.6B on {cpu['cpu']}, "
+                 f"{cpu['cores']} CPUs", fontsize=12, x=0.01, ha="left")
     fig.tight_layout()
     fig.savefig(out / "ladder.svg")
 

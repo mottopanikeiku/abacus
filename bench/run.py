@@ -1,9 +1,9 @@
 """Benchmark every engine commit and llama.cpp the same way, then draw the chart.
 
-usage: uv run bench/run.py [--threads 1,4,8] [--reps 5] [--pp 128] [--tg 128] [--lock FILE]
+usage: uv run bench/run.py [--threads 1,4,8] [--reps 5] [--pp 128] [--tg 128] [--first N] [--lock FILE]
 
 Steps:
-  1. build every commit that touches src/ in its own git worktree
+  1. build every commit that touches src/ in its own git worktree, from step N on
   2. run tools/check.py against each build (skip with --skip-check)
   3. build llama.cpp at LLAMA_COMMIT and convert the model to GGUF
   4. for each repetition and thread count, run every commit and every llama.cpp
@@ -110,18 +110,19 @@ def main():
     ap.add_argument("--max-load", type=float, default=3.0, help="wait until the 1-minute load average is below this")
     ap.add_argument("--skip-check", action="store_true")
     ap.add_argument("--check-cpus", default="0-7", help="cores for the correctness checks")
+    ap.add_argument("--first", type=int, default=1, help="first ladder step to check and time")
     ap.add_argument("--no-llama", action="store_true")
     args = ap.parse_args()
     threads = [int(t) for t in args.threads.split(",")]
     model_dir, model = args.model_dir.expanduser().resolve(), args.model.expanduser().resolve()
 
-    commits = ladder()
-    print(f"{len(commits)} engine commits")
-    binaries = {sha: build(sha) for sha, _, _ in commits}
+    steps = list(enumerate(ladder()))[args.first - 1:]
+    print(f"{len(steps)} engine commits")
+    binaries = {sha: build(sha) for _, (sha, _, _) in steps}
     args.out.mkdir(parents=True, exist_ok=True)
     if not args.skip_check:
         checks, report = [], args.out / "check.tmp.json"
-        for i, (sha, tree, name) in enumerate(commits):
+        for i, (sha, tree, name) in steps:
             ok = subprocess.run(["taskset", "-c", args.check_cpus, sys.executable, ROOT / "tools" / "check.py",
                                  binaries[sha], model, args.ref, "--json", report]).returncode == 0
             checks.append({"index": i, "tree": tree, "step": name, **json.loads(report.read_text())})
@@ -129,7 +130,7 @@ def main():
         report.unlink()
         (args.out / "check.json").write_text(json.dumps(checks, indent=1))
 
-    runners = [("abacus", i, sha, tree, name) for i, (sha, tree, name) in enumerate(commits)]
+    runners = [("abacus", i, sha, tree, name) for i, (sha, tree, name) in steps]
     if not args.no_llama:
         bench, ggufs = setup_llama(model_dir, args.gguf_dir.expanduser())
         runners += [("llama.cpp", None, fmt, None, f"llama.cpp {fmt}") for fmt in LLAMA_FORMATS]

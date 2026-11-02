@@ -1,0 +1,44 @@
+name: x86 benchmark
+# abacus against llama.cpp on a GitHub-hosted x86 runner, the same way as
+# results/ on the Graviton4: interleaved runs, pinned threads, median of reps.
+on:
+  workflow_dispatch:
+    inputs:
+      first:
+        description: first ladder step to time
+        default: "1"
+      threads:
+        default: "1,2,4"
+      reps:
+        default: "5"
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+      - id: cpu
+        run: echo "key=$(grep -m1 'model name' /proc/cpuinfo | md5sum | cut -c1-8)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            models
+            ref
+          key: qwen3-0.6b-${{ runner.arch }}-${{ hashFiles('tools/reference.py', 'uv.lock') }}
+      - uses: actions/cache@v4
+        with:
+          path: .cache/llama.cpp
+          key: llama.cpp-${{ steps.cpu.outputs.key }}-${{ hashFiles('bench/run.py') }}
+      - run: make model
+      - run: test -f ref/ref.json || uv run tools/reference.py models/Qwen3-0.6B ref
+      - run: >
+          uv run bench/run.py --out results/x86 --check-cpus 0-3
+          --first ${{ inputs.first }} --threads ${{ inputs.threads }} --reps ${{ inputs.reps }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: x86-results
+          path: results/x86

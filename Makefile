@@ -14,7 +14,7 @@ abacus: src/*.c src/*.h
 # Download Qwen3-0.6B (1.5 GB) and convert it.
 model.bin:
 	mkdir -p $(MODEL_DIR)
-	for f in config.json tokenizer.json model.safetensors; do \
+	for f in config.json tokenizer.json tokenizer_config.json model.safetensors; do \
 		test -f $(MODEL_DIR)/$$f || curl -fL --progress-bar -o $(MODEL_DIR)/$$f $(HF)/$$f || exit 1; done
 	python3 tools/export.py $(MODEL_DIR) $@
 
