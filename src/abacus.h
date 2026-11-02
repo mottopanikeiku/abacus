@@ -68,6 +68,7 @@ typedef struct {
     // activations for a batch of up to BATCH tokens, one row per token
     float *x, *xn, *qkv, *att, *gate_up, *act;
     float *k_cache, *v_cache; // [layer][position][n_kv_heads * head_dim]
+    float *rope_cos, *rope_sin; // [position][head_dim / 2]
 } Model;
 
 Model *model_load(const char *path);

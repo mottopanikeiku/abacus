@@ -110,6 +110,17 @@ Model *model_load(const char *path) {
     m->act = xcalloc((size_t)BATCH * hidden, sizeof(float));
     m->k_cache = xcalloc((size_t)c->n_layers * c->seq_len * kv_dim, sizeof(float));
     m->v_cache = xcalloc((size_t)c->n_layers * c->seq_len * kv_dim, sizeof(float));
+
+    // rotary angles for every position, so a forward pass calls no cosf or sinf
+    int half = hd / 2;
+    m->rope_cos = xcalloc((size_t)c->seq_len * half, sizeof(float));
+    m->rope_sin = xcalloc((size_t)c->seq_len * half, sizeof(float));
+    for (int pos = 0; pos < c->seq_len; pos++)
+        for (int i = 0; i < half; i++) {
+            float angle = (float)pos * (1.0f / powf(c->rope_theta, (float)(2 * i) / (float)hd));
+            m->rope_cos[(size_t)pos * half + i] = cosf(angle);
+            m->rope_sin[(size_t)pos * half + i] = sinf(angle);
+        }
     return m;
 }
 
@@ -146,20 +157,16 @@ static void rmsnorm(float *out, const float *x, const float *w, int n, float eps
     for (int i = 0; i < n; i++) out[i] = w[i] * (x[i] * scale);
 }
 
-// Rotary embedding on each head: rotate the pair (i, i + head_dim/2) by pos * theta^(-2i/head_dim).
-static void rope(float *x, int n_heads, int head_dim, int pos, float theta) {
+// Rotary embedding on each head: rotate the pair (i, i + head_dim/2) by the
+// angle pos * theta^(-2i/head_dim), whose cos and sin come from a table.
+static void rope(float *x, int n_heads, int head_dim, const float *cos, const float *sin) {
     int half = head_dim / 2;
-    for (int i = 0; i < half; i++) {
-        float freq = 1.0f / powf(theta, (float)(2 * i) / (float)head_dim);
-        float angle = (float)pos * freq;
-        float c = cosf(angle), s = sinf(angle);
-        for (int h = 0; h < n_heads; h++) {
-            float *v = x + h * head_dim;
-            float a = v[i], b = v[i + half];
-            v[i] = a * c - b * s;
-            v[i + half] = b * c + a * s;
+    for (int h = 0; h < n_heads; h++, x += head_dim)
+        for (int i = 0; i < half; i++) {
+            float a = x[i], b = x[i + half];
+            x[i] = a * cos[i] - b * sin[i];
+            x[i + half] = b * cos[i] + a * sin[i];
         }
-    }
 }
 
 static void softmax(float *x, int n) {
@@ -232,8 +239,9 @@ static void rotate_and_cache(const Step *s, int i) {
     float *q = s->m->qkv + (size_t)i * (q_dim + 2 * kv_dim), *k = q + q_dim, *v = k + kv_dim;
     for (int h = 0; h < c->n_heads; h++) rmsnorm(q + h * hd, q + h * hd, s->L->q_norm, hd, c->norm_eps);
     for (int h = 0; h < c->n_kv_heads; h++) rmsnorm(k + h * hd, k + h * hd, s->L->k_norm, hd, c->norm_eps);
-    rope(q, c->n_heads, hd, pos, c->rope_theta);
-    rope(k, c->n_kv_heads, hd, pos, c->rope_theta);
+    const float *cos = s->m->rope_cos + (size_t)pos * (hd / 2), *sin = s->m->rope_sin + (size_t)pos * (hd / 2);
+    rope(q, c->n_heads, hd, cos, sin);
+    rope(k, c->n_kv_heads, hd, cos, sin);
     size_t at = ((size_t)s->layer * c->seq_len + pos) * kv_dim;
     memcpy(s->m->k_cache + at, k, kv_dim * sizeof(float));
     memcpy(s->m->v_cache + at, v, kv_dim * sizeof(float));
