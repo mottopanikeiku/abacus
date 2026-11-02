@@ -1,9 +1,13 @@
-name: x86 benchmark
-# abacus against llama.cpp on a GitHub-hosted x86 runner, the same way as
-# results/ on the Graviton4: interleaved runs, pinned threads, median of reps.
+name: benchmark
+# abacus against llama.cpp on a GitHub-hosted runner, the same way as results/
+# on the Graviton4: interleaved runs, pinned threads, medians over repetitions.
 on:
   workflow_dispatch:
     inputs:
+      runner:
+        type: choice
+        options: [ubuntu-latest, ubuntu-24.04-arm]
+        default: ubuntu-latest
       first:
         description: first ladder step to time
         default: "1"
@@ -14,15 +18,17 @@ on:
 
 jobs:
   bench:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 340
+    env:
+      OUT: results/${{ inputs.runner == 'ubuntu-latest' && 'x86' || 'arm' }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - uses: astral-sh/setup-uv@v6
       - id: cpu
-        run: echo "key=$(grep -m1 'model name' /proc/cpuinfo | md5sum | cut -c1-8)" >> "$GITHUB_OUTPUT"
+        run: echo "key=$(grep -m1 -iE 'model name|^CPU part' /proc/cpuinfo | md5sum | cut -c1-8)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v4
         with:
           path: |
@@ -32,13 +38,13 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: .cache/llama.cpp
-          key: llama.cpp-${{ steps.cpu.outputs.key }}-${{ hashFiles('bench/run.py') }}
+          key: llama.cpp-${{ runner.arch }}-${{ steps.cpu.outputs.key }}-${{ hashFiles('bench/run.py') }}
       - run: make model
       - run: test -f ref/ref.json || uv run tools/reference.py models/Qwen3-0.6B ref
       - run: >
-          uv run bench/run.py --out results/x86 --check-cpus 0-3
+          uv run bench/run.py --out "$OUT" --check-cpus 0-3
           --first ${{ inputs.first }} --threads ${{ inputs.threads }} --reps ${{ inputs.reps }}
       - uses: actions/upload-artifact@v4
         with:
-          name: x86-results
-          path: results/x86
+          name: results-${{ runner.arch }}-${{ github.run_id }}
+          path: ${{ env.OUT }}
