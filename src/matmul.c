@@ -20,8 +20,8 @@
 
 // Weights are quantized once, at load: scale = max|w| / 127 per block of a row.
 QMatrix quantize_matrix(const bf16 *w, int rows, int cols) {
-    if (rows % 4 || cols % BLOCK) {
-        fprintf(stderr, "abacus: matrix shape %dx%d is not a multiple of 4x32\n", rows, cols);
+    if (rows % 8 || cols % BLOCK) { // products work on 8 rows at a time
+        fprintf(stderr, "abacus: matrix shape %dx%d is not a multiple of 8x32\n", rows, cols);
         exit(1);
     }
     int blocks = cols / BLOCK;
@@ -84,35 +84,46 @@ static void group_x1(float *out, const int8_t *q, const f16 *d, const int8_t *x,
 }
 
 #ifdef __ARM_FEATURE_MATMUL_INT8
-// One group times four tokens. SMMLA multiplies a 2x8 int8 matrix by the
-// transpose of another 2x8 one and adds the 2x2 int32 result: two rows times
-// two tokens, eight deep, twice the work of an SDOT. out has row stride ldo.
-static void group_x4(float *out, int ldo, const int8_t *q, const f16 *d, const int8_t *x, const float *xd, int blocks) {
+// Two groups (8 rows) times four tokens. SMMLA multiplies a 2x8 int8 matrix
+// by the transpose of another 2x8 one and adds the 2x2 int32 result: two rows
+// times two tokens, eight deep, twice the work of an SDOT. The tile is 4 row
+// pairs by 2 token pairs, so each loaded input feeds four SMMLAs. out has row
+// stride ldo.
+static void tile_8x4(float *out, int ldo, const int8_t *q, const f16 *d, const int8_t *x, const float *xd, int blocks) {
     int cols = blocks * BLOCK;
-    float32x4_t acc[2][2]; // [row pair][token pair], lanes (r0,t0) (r0,t1) (r1,t0) (r1,t1)
-    for (int p = 0; p < 2; p++)
+    size_t next_q = (size_t)blocks * 128, next_d = (size_t)blocks * 4; // second group
+    float32x4_t acc[4][2]; // [row pair][token pair], lanes (r0,t0) (r0,t1) (r1,t0) (r1,t1)
+    for (int p = 0; p < 4; p++)
         for (int t = 0; t < 2; t++) acc[p][t] = vdupq_n_f32(0.0f);
-    for (int b = 0; b < blocks; b++, q += 128, d += 4) {
-        int32x4_t s[2][2];
-        for (int p = 0; p < 2; p++)
+    for (int b = 0; b < blocks; b++) {
+        int32x4_t s[4][2];
+        for (int p = 0; p < 4; p++)
             for (int t = 0; t < 2; t++) s[p][t] = vdupq_n_s32(0);
-        for (int c = 0; c < 4; c++) {
+        for (int c = 0; c < 4; c += 2) {
+            // 16 bytes of each token cover two chunks; pair the tokens up chunk by chunk
             const int8_t *xc = x + b * BLOCK + c * 8;
-            int8x16_t w[2] = {vld1q_s8(q + c * 32), vld1q_s8(q + c * 32 + 16)};
-            int8x16_t xt[2] = {vcombine_s8(vld1_s8(xc), vld1_s8(xc + cols)),
-                               vcombine_s8(vld1_s8(xc + 2 * cols), vld1_s8(xc + 3 * cols))};
-            for (int p = 0; p < 2; p++)
-                for (int t = 0; t < 2; t++) s[p][t] = vmmlaq_s32(s[p][t], w[p], xt[t]);
+            int64x2_t x0 = vreinterpretq_s64_s8(vld1q_s8(xc)), x1 = vreinterpretq_s64_s8(vld1q_s8(xc + cols));
+            int64x2_t x2 = vreinterpretq_s64_s8(vld1q_s8(xc + 2 * cols)), x3 = vreinterpretq_s64_s8(vld1q_s8(xc + 3 * cols));
+            int8x16_t xt[2][2] = {{vreinterpretq_s8_s64(vzip1q_s64(x0, x1)), vreinterpretq_s8_s64(vzip1q_s64(x2, x3))},
+                                  {vreinterpretq_s8_s64(vzip2q_s64(x0, x1)), vreinterpretq_s8_s64(vzip2q_s64(x2, x3))}};
+            for (int h = 0; h < 2; h++)
+                for (int p = 0; p < 4; p++) {
+                    int8x16_t w = vld1q_s8(q + (p / 2) * next_q + (size_t)b * 128 + (c + h) * 32 + (p % 2) * 16);
+                    for (int t = 0; t < 2; t++) s[p][t] = vmmlaq_s32(s[p][t], w, xt[h][t]);
+                }
         }
-        float32x4_t rs = vcvt_f32_f16(vld1_f16((const float16_t *)d));
         float32x4_t ts = {xd[b], xd[blocks + b], xd[2 * blocks + b], xd[3 * blocks + b]};
-        float32x4_t row[2] = {vzip1q_f32(rs, rs), vzip2q_f32(rs, rs)}; // (r0,r0,r1,r1), (r2,r2,r3,r3)
         float32x4_t tok[2] = {vcombine_f32(vget_low_f32(ts), vget_low_f32(ts)),
                               vcombine_f32(vget_high_f32(ts), vget_high_f32(ts))}; // (t0,t1,t0,t1), (t2,t3,t2,t3)
-        for (int p = 0; p < 2; p++)
-            for (int t = 0; t < 2; t++) acc[p][t] = vfmaq_f32(acc[p][t], vcvtq_f32_s32(s[p][t]), vmulq_f32(row[p], tok[t]));
+        for (int g = 0; g < 2; g++) {
+            float32x4_t rs = vcvt_f32_f16(vld1_f16((const float16_t *)d + g * next_d + b * 4));
+            float32x4_t row[2] = {vzip1q_f32(rs, rs), vzip2q_f32(rs, rs)}; // (r0,r0,r1,r1), (r2,r2,r3,r3)
+            for (int p = 0; p < 2; p++)
+                for (int t = 0; t < 2; t++)
+                    acc[2 * g + p][t] = vfmaq_f32(acc[2 * g + p][t], vcvtq_f32_s32(s[2 * g + p][t]), vmulq_f32(row[p], tok[t]));
+        }
     }
-    for (int p = 0; p < 2; p++)
+    for (int p = 0; p < 4; p++)
         for (int t = 0; t < 2; t++) {
             float v[4];
             vst1q_f32(v, acc[p][t]);
@@ -143,18 +154,20 @@ static void quantize_rows(void *arg, int thread, int n_threads) {
 static void matmul_rows(void *arg, int thread, int n_threads) {
     const Matmul *a = arg;
     const QMatrix *w = a->w;
-    int rows = w->rows, cols = w->cols, blocks = cols / BLOCK, groups = rows / 4;
-    for (int g = groups * thread / n_threads; g < groups * (thread + 1) / n_threads; g++) {
-        const int8_t *q = w->q + (size_t)g * blocks * 128;
-        const f16 *d = w->d + (size_t)g * blocks * 4;
-        float *out = a->out + 4 * g;
+    int rows = w->rows, cols = w->cols, blocks = cols / BLOCK, tiles = rows / 8;
+    for (int i = tiles * thread / n_threads; i < tiles * (thread + 1) / n_threads; i++) {
+        const int8_t *q = w->q + (size_t)2 * i * blocks * 128;
+        const f16 *d = w->d + (size_t)2 * i * blocks * 4;
+        float *out = a->out + 8 * i;
         int t = 0;
 #ifdef __ARM_FEATURE_MATMUL_INT8
         for (; t + 4 <= a->n; t += 4)
-            group_x4(out + (size_t)t * rows, rows, q, d, a->xq + (size_t)t * cols, a->xd + (size_t)t * blocks, blocks);
+            tile_8x4(out + (size_t)t * rows, rows, q, d, a->xq + (size_t)t * cols, a->xd + (size_t)t * blocks, blocks);
 #endif
         for (; t < a->n; t++)
-            group_x1(out + (size_t)t * rows, q, d, a->xq + (size_t)t * cols, a->xd + (size_t)t * blocks, blocks);
+            for (int g = 0; g < 2; g++)
+                group_x1(out + (size_t)t * rows + 4 * g, q + (size_t)g * blocks * 128, d + (size_t)g * blocks * 4,
+                         a->xq + (size_t)t * cols, a->xd + (size_t)t * blocks, blocks);
     }
 }
 
