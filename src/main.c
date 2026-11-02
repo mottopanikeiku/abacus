@@ -133,8 +133,8 @@ int main(int argc, char **argv) {
         }
     }
 
+    pool_start(threads); // loading quantizes on every thread
     Model *m = model_load(argv[1], bits);
-    pool_start(threads);
     const Config *c = &m->c;
     int vocab = c->vocab_size;
     int *tokens = malloc(c->seq_len * sizeof(int));

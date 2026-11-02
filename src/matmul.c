@@ -24,33 +24,46 @@
 #include <stdlib.h>
 #include <string.h>
 
+typedef struct {
+    const bf16 *w;
+    QMatrix *m;
+} Quantize;
+
 // Weights are quantized once, at load. With 8 bits, scale = max|w| / 127 per
 // block of a row. With 4 bits, scale = -m / 8 where m is the weight of largest
-// magnitude: m becomes -8 and the others land in -8..7.
-QMatrix quantize_matrix(const bf16 *w, int rows, int cols, int bits) {
-    if (rows % 8 || cols % BLOCK) { // products work on 8 rows at a time
-        fprintf(stderr, "abacus: matrix shape %dx%d is not a multiple of 8x32\n", rows, cols);
-        exit(1);
-    }
-    int blocks = cols / BLOCK, bytes = 16 * bits; // bytes = one block of a group
-    QMatrix m = {calloc((size_t)rows / 4 * blocks, bytes), malloc((size_t)rows * blocks * sizeof(f16)), rows, cols,
-                 bits};
-    for (int r = 0; r < rows; r++)
+// magnitude: m becomes -8 and the others land in -8..7. Each thread takes a
+// share of the row groups (the 4 rows of a group share bytes at 4 bits).
+static void quantize_groups(void *arg, int thread, int n_threads) {
+    const Quantize *a = arg;
+    QMatrix *m = a->m;
+    int groups = m->rows / 4, cols = m->cols, blocks = cols / BLOCK, bits = m->bits, bytes = 16 * bits;
+    for (int r = groups * thread / n_threads * 4; r < groups * (thread + 1) / n_threads * 4; r++)
         for (int b = 0; b < blocks; b++) {
-            const bf16 *src = w + (size_t)r * cols + b * BLOCK;
+            const bf16 *src = a->w + (size_t)r * cols + b * BLOCK;
             float big = 0.0f;
             for (int i = 0; i < BLOCK; i++)
                 if (fabsf(bf16_to_f32(src[i])) > fabsf(big)) big = bf16_to_f32(src[i]);
             float d = bits == 8 ? fabsf(big) / 127.0f : big / -8.0f, inv = d ? 1.0f / d : 0.0f;
             size_t block = (size_t)(r / 4) * blocks + b; // position of this block in group order
-            m.d[block * 4 + r % 4] = (f16)d;
-            int8_t *q = m.q + block * bytes;
+            m->d[block * 4 + r % 4] = (f16)d;
+            int8_t *q = m->q + block * bytes;
             for (int i = 0; i < BLOCK; i++) {
                 int k = (i / 8) * 32 + (r % 4) * 8 + i % 8, v = (int)roundf(bf16_to_f32(src[i]) * inv);
                 if (bits == 8) q[k] = (int8_t)v;
                 else q[k % 64] |= (int8_t)(((v < 7 ? v : 7) & 15) << (k < 64 ? 0 : 4));
             }
         }
+}
+
+QMatrix quantize_matrix(const bf16 *w, int rows, int cols, int bits) {
+    if (rows % 8 || cols % BLOCK) { // products work on 8 rows at a time
+        fprintf(stderr, "abacus: matrix shape %dx%d is not a multiple of 8x32\n", rows, cols);
+        exit(1);
+    }
+    int blocks = cols / BLOCK;
+    QMatrix m = {calloc((size_t)rows / 4 * blocks, 16 * bits), malloc((size_t)rows * blocks * sizeof(f16)), rows,
+                 cols, bits};
+    pool_run(quantize_groups, &(Quantize){w, &m});
     return m;
 }
 
