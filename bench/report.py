@@ -43,6 +43,7 @@ def main():
     threads = sorted({r["threads"] for r in rows})
     runs = sorted({r.get("run", "") for r in rows})
     samples = defaultdict(list)
+    paired = {}  # (key, threads, metric, run, rep) -> value, to pair abacus with llama.cpp within a repetition
     labels = {}
     for r in rows:  # abacus runs are keyed (step, flags), llama.cpp runs by label
         key = (r["index"], r.get("flags", "")) if r["runner"] == "abacus" else r["label"]
@@ -50,13 +51,20 @@ def main():
         for metric, _ in METRICS:
             samples[key, r["threads"], metric].append(r[metric])
             samples[key, r["threads"], metric, r.get("run", "")].append(r[metric])
+            paired[key, r["threads"], metric, r.get("run", ""), r["rep"]] = r[metric]
         if r.get("load_s") is not None:
             samples[key, r["threads"], "load_s"].append(r["load_s"])
     stats = {k: median_ci(v) for k, v in samples.items()}
     steps = sorted(k for k in labels if isinstance(k, tuple) and not k[1])
     q4 = sorted(k for k in labels if isinstance(k, tuple) and k[1])
     llama = sorted(k for k in labels if isinstance(k, str))
-    reps = len(samples[steps[0], threads[0], "decode_tok_s"])
+    reps = len({r["rep"] for r in rows})
+
+    def ratio(a, b, t, metric, run=None):
+        """abacus a over llama.cpp b, one ratio per repetition in which both ran: (median, low, high)"""
+        x = [v / paired[b, t, metric, j, rep] for (k, tt, m, j, rep), v in paired.items()
+             if k == a and tt == t and m == metric and run in (None, j) and (b, t, metric, j, rep) in paired]
+        return median_ci(x) if x else None
 
     loads = [k for k in steps + q4 if (k, threads[0], "load_s") in stats]
     if loads:  # appended after the speed tables below
@@ -67,7 +75,8 @@ def main():
             cells = [f"{stats[k, t, 'load_s'][0]:.2f} [{stats[k, t, 'load_s'][1]:.2f}, {stats[k, t, 'load_s'][2]:.2f}]"
                      for t in threads]
             load_lines.append(f"| {k[0] + 1} | {labels[k]} | " + " | ".join(cells) + " |")
-    jobs = f" from {len(runs)} separate benchmark jobs" if len(runs) > 1 else ""
+    jobs = (f" in each of {len(runs)} separate benchmark jobs (a job may start at a later commit)"
+            if len(runs) > 1 else "")
     lines = [f"Qwen3-0.6B, {pp}-token prefill and {tg}-token decode. Median tokens/s of {reps} interleaved runs{jobs}; "
              "brackets are 95% bootstrap intervals.", ""]
     for metric, name in METRICS:
@@ -83,28 +92,39 @@ def main():
         lines.append("")
     pairs = [(steps[-1], "llama.cpp Q8_0")] + ([(q4[-1], "llama.cpp Q4_0")] if q4 else [])
     pairs = [(a, b) for a, b in pairs if b in labels]
-    lines += ["## abacus vs llama.cpp", "", "| Threads | " + " | ".join(
-        f"{name}: {labels[a]} vs {b}" for a, b in pairs for _, name in METRICS) + " |",
+    lines += ["## abacus vs llama.cpp", "", "The ratio of abacus to llama.cpp tokens/s within each repetition, "
+              "median and 95% interval over the repetitions.", "",
+              "| Threads | " + " | ".join(f"{name}: {labels[a]} vs {b}" for a, b in pairs for _, name in METRICS) + " |",
               "|---:|" + "---:|" * (len(METRICS) * len(pairs))]
     for t in threads:
-        ratios = [stats[a, t, metric][0] / stats[b, t, metric][0] for a, b in pairs for metric, _ in METRICS]
-        lines.append(f"| {t} | " + " | ".join(f"{r:.2f}x" for r in ratios) + " |")
+        cells = [ratio(a, b, t, metric) for a, b in pairs for metric, _ in METRICS]
+        lines.append(f"| {t} | " + " | ".join(f"{m:.2f}x [{lo:.2f}, {hi:.2f}]" for m, lo, hi in cells) + " |")
     if loads:
         lines += [""] + load_lines
     if len(runs) > 1:
-        lines += ["", "## Job to job", "", "Each benchmark job on its own, for the newest commit and llama.cpp. "
-                  "\"apart\" marks a cell whose intervals don't overlap with the other jobs'.", "",
-                  "| Runner | Threads | " + " | ".join(f"{name}, job {j + 1}" for _, name in METRICS
-                                                        for j in range(len(runs))) + " |",
-                  "|---|---:|" + "---:|" * (len(METRICS) * len(runs))]
-        for key in [steps[-1]] + q4[-1:] + llama:
-            for t in threads:
-                cells = []
-                for metric, _ in METRICS:
-                    per = [stats[key, t, metric, run] for run in runs]
-                    apart = max(lo for _, lo, _ in per) > min(hi for _, _, hi in per)
-                    cells += [f"{fmt(m)} [{fmt(lo)}, {fmt(hi)}]" + (" apart" if apart else "") for m, lo, hi in per]
-                lines.append(f"| {labels[key]} | {t} | " + " | ".join(cells) + " |")
+        def row(name, t, per, as_ratio):
+            apart = max(lo for _, lo, _ in per) > min(hi for _, _, hi in per)
+            return f"| {name} | {t} | " + " | ".join(
+                (f"{m:.2f}x [{lo:.2f}, {hi:.2f}]" if as_ratio else f"{fmt(m)} [{fmt(lo)}, {fmt(hi)}]")
+                + (" apart" if apart else "") for m, lo, hi in per) + " |"
+
+        lines += ["", "## Job to job", "", "Each benchmark job on its own, for the newest commit and llama.cpp, first "
+                  "as ratios within a repetition, then as tokens/s. \"apart\" marks a value whose interval doesn't "
+                  "overlap with another job's."]
+        for metric, name in METRICS:
+            with_both = [j for j in runs if all(ratio(a, b, threads[0], metric, j) for a, b in pairs)]
+            for as_ratio in (True, False):
+                lines += ["", f"| {name} | Threads | " + " | ".join(f"job {runs.index(j) + 1}" for j in with_both)
+                          + " |", "|---|---:|" + "---:|" * len(with_both)]
+                for t in threads:
+                    if as_ratio:
+                        for a, b in pairs:
+                            per = [ratio(a, b, t, metric, j) for j in with_both]
+                            lines.append(row(f"{labels[a]} vs {b}", t, per, True))
+                    else:
+                        for key in [steps[-1]] + q4[-1:] + llama:
+                            lines.append(row(labels[key], t, [stats[key, t, metric, j] for j in with_both], False))
+        lines += ["", "Jobs: " + ", ".join(f"{i + 1} = {j}" for i, j in enumerate(runs)) + "."]
     (out / "table.md").write_text("\n".join(lines) + "\n")
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 5.8), sharex=True)
