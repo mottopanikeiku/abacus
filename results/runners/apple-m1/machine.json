@@ -1,0 +1,8 @@
+{
+ "cpu": "Apple M1 (Virtual)",
+ "cores": 3,
+ "kernel": "23.6.0",
+ "compiler": "Apple clang version 15.0.0 (clang-1500.3.9.4)",
+ "llama_cpp": "785322d17f2d51e5185cf996a1f4e46d87640841",
+ "abacus": "qwen3 dim=1024 hidden=3072 layers=28 heads=16/8 head_dim=128 vocab=151936 weights=q8_0 kernels=neon dotprod"
+}

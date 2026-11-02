@@ -1,0 +1,8 @@
+{
+ "cpu": "AMD EPYC 7763 64-Core Processor",
+ "cores": 4,
+ "kernel": "7.0.0-1017-azure",
+ "compiler": "cc (Ubuntu 15.2.0-16ubuntu1) 15.2.0",
+ "llama_cpp": "785322d17f2d51e5185cf996a1f4e46d87640841",
+ "abacus": "qwen3 dim=1024 hidden=3072 layers=28 heads=16/8 head_dim=128 vocab=151936 weights=q8_0 kernels=avx2"
+}

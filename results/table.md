@@ -42,8 +42,10 @@ Qwen3-0.6B, 128-token prefill and 128-token decode. Median tokens/s of 5 interle
 
 ## abacus vs llama.cpp
 
-| Threads | Decode vs llama.cpp Q4_0 | Decode vs llama.cpp Q8_0 | Prefill vs llama.cpp Q4_0 | Prefill vs llama.cpp Q8_0 |
-|---:|---:|---:|---:|---:|
-| 1 | 1.15x | 0.96x | 1.63x | 1.70x |
-| 4 | 0.99x | 1.05x | 1.45x | 1.51x |
-| 8 | 0.89x | 1.04x | 1.49x | 1.56x |
+The ratio of abacus to llama.cpp tokens/s within each repetition, median and 95% interval over the repetitions.
+
+| Threads | Decode: 8x4 i8mm tiles vs llama.cpp Q8_0 | Prefill: 8x4 i8mm tiles vs llama.cpp Q8_0 |
+|---:|---:|---:|
+| 1 | 0.96x [0.95, 1.00] | 1.70x [1.66, 1.71] |
+| 4 | 1.05x [1.05, 1.59] | 1.51x [1.50, 1.52] |
+| 8 | 1.04x [1.02, 1.05] | 1.56x [1.56, 1.57] |
