@@ -129,3 +129,18 @@ end. Decoding streams 4.5 bits per weight instead of 8.5.
 Weights are quantized as the model loads, and that ran on one thread: fine for
 0.6B, slow for 4B. The pool now starts before loading and each thread
 quantizes its share of the row groups.
+
+## hadamard rotation
+<!-- show src/matmul.c "static void rotate(float *x)" -->
+Qwen3-1.7B failed the int8 check with a mean KL of 0.026 against the limit of
+0.02, so its hidden states after every layer went next to those of
+transformers. The error grew just as it did in a simulation that quantizes the
+inputs of every product as well as the weights, and well beyond what
+quantizing the weights alone costs, because a few inputs are thousands of
+times larger than the rest of their block of 32 and the block's scale rounds
+the other 31 towards zero. Every block of 32 weights and of inputs now goes
+through the same 32x32 Hadamard matrix before it is quantized. The matrix is
+orthogonal, so each block's dot product stays the same while a large value
+gets spread over the whole block, and the kernels don't change at all. Mean
+KL on Qwen3-1.7B drops to 0.005. The 4-bit weights stay as they were, because
+in the same simulation rotating them made the model less accurate.

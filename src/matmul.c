@@ -2,6 +2,17 @@
 // 32 int8 values times one scale. A block's share of a dot product is an exact
 // integer sum times two scales.
 //
+// With 8-bit weights, every block of 32 weights and every block of 32 inputs
+// is rotated by the same 32x32 Hadamard matrix before it is quantized. The
+// matrix is orthogonal and symmetric, so the rotated blocks have the same dot
+// product as the originals, but a block's largest value gets spread over all
+// 32 of them and no longer sets a scale that rounds its neighbours to zero.
+// Some Qwen3 inputs are thousands of times larger than the rest of their
+// block, and rotating is what got Qwen3-1.7B through the accuracy check.
+// 4-bit weights stay unrotated because their rounding already lands the
+// largest value exactly, and rotating them cost more accuracy than it saved.
+// Rotating before quantizing is the idea behind QuaRot and QuIP#.
+//
 // Weights are kept in groups of 4 rows. Inside a group, each block of 32
 // columns is 128 bytes: 8 bytes of row 0, 8 of row 1, 8 of row 2, 8 of row 3,
 // then the next 8 of each row, and so on (llama.cpp's q8_0 4x8 layout).
@@ -29,26 +40,56 @@ typedef struct {
     QMatrix *m;
 } Quantize;
 
+// The 32-point Walsh-Hadamard transform, scaled by 1 / sqrt(32) so that
+// applying it twice gives back x. Its five butterfly stages pair values 1, 2,
+// 4, 8 and 16 apart; held as eight 4-wide vectors, the first two stages are
+// a lane swap and a multiply-add inside each vector, the other three add and
+// subtract whole vectors.
+typedef float v4 __attribute__((vector_size(16)));
+#if defined(__clang__) || __GNUC__ >= 12
+#define LANES(v, a, b, c, d) __builtin_shufflevector(v, v, a, b, c, d)
+#else // GCC 11 and older only have their own builtin
+typedef int v4i __attribute__((vector_size(16)));
+#define LANES(v, a, b, c, d) __builtin_shuffle(v, (v4i){a, b, c, d})
+#endif
+static void rotate(float *x) {
+    v4 v[BLOCK / 4];
+    memcpy(v, x, sizeof v);
+    for (int i = 0; i < BLOCK / 4; i++) {
+        v[i] = LANES(v[i], 1, 0, 3, 2) + v[i] * (v4){1, -1, 1, -1};
+        v[i] = LANES(v[i], 2, 3, 0, 1) + v[i] * (v4){1, 1, -1, -1};
+    }
+    for (int h = 1; h < BLOCK / 4; h *= 2)
+        for (int i = 0; i < BLOCK / 4; i += 2 * h)
+            for (int j = i; j < i + h; j++) {
+                v4 a = v[j], b = v[j + h];
+                v[j] = a + b, v[j + h] = a - b;
+            }
+    for (int i = 0; i < BLOCK / 4; i++) v[i] *= 0.17677669529663687f;
+    memcpy(x, v, sizeof v);
+}
+
 // Weights are quantized once, at load. With 8 bits, scale = max|w| / 127 per
-// block of a row. With 4 bits, scale = -m / 8 where m is the weight of largest
-// magnitude: m becomes -8 and the others land in -8..7. Each thread takes a
-// share of the row groups (the 4 rows of a group share bytes at 4 bits).
+// (rotated) block of a row. With 4 bits, scale = -m / 8 where m is the weight
+// of largest magnitude: m becomes -8 and the others land in -8..7. Each thread
+// takes a share of the row groups (the 4 rows of a group share bytes at 4 bits).
 static void quantize_groups(void *arg, int thread, int n_threads) {
     const Quantize *a = arg;
     QMatrix *m = a->m;
     int groups = m->rows / 4, cols = m->cols, blocks = cols / BLOCK, bits = m->bits, bytes = 16 * bits;
     for (int r = groups * thread / n_threads * 4; r < groups * (thread + 1) / n_threads * 4; r++)
         for (int b = 0; b < blocks; b++) {
-            const bf16 *src = a->w + (size_t)r * cols + b * BLOCK;
-            float big = 0.0f;
+            float w[BLOCK], big = 0.0f;
+            for (int i = 0; i < BLOCK; i++) w[i] = bf16_to_f32(a->w[(size_t)r * cols + b * BLOCK + i]);
+            if (bits == 8) rotate(w);
             for (int i = 0; i < BLOCK; i++)
-                if (fabsf(bf16_to_f32(src[i])) > fabsf(big)) big = bf16_to_f32(src[i]);
+                if (fabsf(w[i]) > fabsf(big)) big = w[i];
             float d = bits == 8 ? fabsf(big) / 127.0f : big / -8.0f, inv = d ? 1.0f / d : 0.0f;
             size_t block = (size_t)(r / 4) * blocks + b; // position of this block in group order
             m->d[block * 4 + r % 4] = (f16)d;
             int8_t *q = m->q + block * bytes;
             for (int i = 0; i < BLOCK; i++) {
-                int k = (i / 8) * 32 + (r % 4) * 8 + i % 8, v = (int)roundf(bf16_to_f32(src[i]) * inv);
+                int k = (i / 8) * 32 + (r % 4) * 8 + i % 8, v = (int)roundf(w[i] * inv);
                 if (bits == 8) q[k] = (int8_t)v;
                 else q[k % 64] |= (int8_t)(((v < 7 ? v : 7) & 15) << (k < 64 ? 0 : 4));
             }
@@ -67,14 +108,17 @@ QMatrix quantize_matrix(const bf16 *w, int rows, int cols, int bits) {
     return m;
 }
 
-// Inputs are quantized the same way before every product, one row per token.
-static void quantize_vector(int8_t *q, float *d, const float *x, int n) {
+// Inputs are quantized the same way before every product, one row per token,
+// and rotated first if the weights are.
+static void quantize_vector(int8_t *q, float *d, const float *x, int n, int rotated) {
     for (int b = 0; b < n / BLOCK; b++) {
-        float amax = 0.0f;
-        for (int i = 0; i < BLOCK; i++) amax = fmaxf(amax, fabsf(x[b * BLOCK + i]));
+        float v[BLOCK], amax = 0.0f;
+        memcpy(v, x + b * BLOCK, sizeof v);
+        if (rotated) rotate(v);
+        for (int i = 0; i < BLOCK; i++) amax = fmaxf(amax, fabsf(v[i]));
         d[b] = amax / 127.0f;
         float inv = d[b] ? 1.0f / d[b] : 0.0f;
-        for (int i = 0; i < BLOCK; i++) q[b * BLOCK + i] = (int8_t)roundf(x[b * BLOCK + i] * inv);
+        for (int i = 0; i < BLOCK; i++) q[b * BLOCK + i] = (int8_t)roundf(v[i] * inv);
     }
 }
 
@@ -127,7 +171,8 @@ static void quantize_rows(void *arg, int thread, int n_threads) {
     const Matmul *a = arg;
     int cols = a->w->cols;
     for (int t = a->n * thread / n_threads; t < a->n * (thread + 1) / n_threads; t++)
-        quantize_vector(a->xq + (size_t)t * cols, a->xd + (size_t)t * (cols / BLOCK), a->x + (size_t)t * cols, cols);
+        quantize_vector(a->xq + (size_t)t * cols, a->xd + (size_t)t * (cols / BLOCK), a->x + (size_t)t * cols, cols,
+                        a->w->bits == 8);
 }
 
 static void matmul_rows(void *arg, int thread, int n_threads) {

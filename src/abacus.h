@@ -44,9 +44,9 @@ static inline float bf16_to_f32(bf16 h) {
 }
 
 // Weights in blocks of 32 along each row, one f16 scale per block. With 8 bits
-// these are the numbers of llama.cpp's Q8_0, with 4 bits those of its Q4_0,
-// with values and scales in separate arrays. Rows are interleaved in groups
-// of 4; matmul.c describes the layout.
+// these are the numbers of llama.cpp's Q8_0 for each block after a Hadamard
+// rotation, with 4 bits those of its Q4_0, with values and scales in separate
+// arrays. Rows are interleaved in groups of 4; matmul.c describes the layout.
 typedef struct {
     int8_t *q; // [rows / 4][cols / 32][16 * bits]
     f16 *d;    // [rows / 4][cols / 32][4]
