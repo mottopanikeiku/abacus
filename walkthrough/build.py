@@ -20,8 +20,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 REPO = "https://github.com/mottopanikeiku/abacus"
 # (results dir, threads, machine name) for the bars
-MACHINES = [("results", 8, "Graviton4, 8 threads"), ("results/x86", 4, "x86 runner, 4 threads"),
-            ("results/arm", 4, "arm64 runner, 4 threads")]
+MACHINES = [("results", 8, "Graviton4, 8 threads"), ("results/runners/neoverse-n2", 4, "Neoverse-N2 runner, 4 threads"),
+            ("results/runners/epyc-9v74", 4, "EPYC 9V74 runner, 4 threads"),
+            ("results/runners/apple-m1", 1, "Apple M1 runner, 1 thread")]
 CONTEXT = 12  # most diff lines shown per step
 
 
@@ -79,9 +80,10 @@ def bar(value, before, top):
 
 
 def bar_rows(label, now, before, top):
-    return [f"<tr><th>{metric}</th><td>{html.escape(label)}</td>"
-            f"<td>{bar(now[j], before[j] if before else None, top)}</td></tr>"
-            for j, metric in enumerate(("decode", "prefill"))]
+    """A row naming the machine, then a bar each for decode and prefill."""
+    return [f'<tr><td colspan="2" class="machine">{html.escape(label)}</td></tr>'] + [
+        f'<tr><th>{metric}</th><td class="bar">{bar(now[j], before[j] if before else None, top)}</td></tr>'
+        for j, metric in enumerate(("decode", "prefill"))]
 
 
 def main():
@@ -108,12 +110,13 @@ def main():
                 rows += bar_rows(machine + ", --q4", m[i, "--q4", t], now, tops[machine])
                 q4_shown.add(machine)
         diff = key_lines(sha, path, pattern) if path else []
-        code = "\n".join(f'<span class="{"add" if l[0] == "+" else "del" if l[0] == "-" else "ctx"}">'
-                         f"{html.escape(l)}</span>" for l in diff)
+        # each line is a block of its own, so a newline between them would add an empty line
+        code = "".join(f'<span class="{"add" if l[0] == "+" else "del" if l[0] == "-" else "ctx"}">'
+                       f"{html.escape(l)}</span>" for l in diff)
         body.append(f'<section id="{i + 1}"><h2><a href="#{i + 1}">{i + 1}.</a> {html.escape(name)}</h2>\n'
                     + "".join(f"<p>{html.escape(p)}</p>\n" for p in paras)
                     + (f'<figure><figcaption>{html.escape(path)}, <a href="{REPO}/commit/{sha}">'
-                       f'{sha[:7]}</a></figcaption><pre>{code}</pre></figure>\n' if code else "")
+                       f'full diff</a></figcaption><pre>{code}</pre></figure>\n' if code else "")
                     + (f'<table class="bars">{"".join(rows)}</table>\n' if rows else "")
                     + "</section>")
 
@@ -156,31 +159,33 @@ pre span { display: block; white-space: pre; }
 .add { background: var(--add); }
 .del { background: var(--del); }
 .ctx { color: var(--dim); }
-table.bars { width: 100%; border-collapse: collapse; font-size: .82rem; margin-top: .8rem; }
-.bars th { text-align: left; font-weight: 600; width: 4.5rem; padding: .15rem 0; }
-.bars td:nth-child(2) { color: var(--dim); width: 13rem; }
-.bars td:last-child { display: flex; align-items: center; gap: .6rem; }
+table.bars { width: 100%; border-collapse: collapse; font-size: .82rem; margin-top: .6rem; }
+.bars th { text-align: left; font-weight: 600; width: 4.5rem; padding: .1rem 0; }
+.bars td.machine { color: var(--dim); padding: .55rem 0 .1rem; }
+.bars td.bar { display: flex; align-items: center; gap: .6rem; }
 .track { position: relative; flex: 1; height: .65rem; background: var(--track); border-radius: 3px; }
 .track b { position: absolute; inset: 0 auto 0 0; background: var(--bar); border-radius: 3px; }
 .track i { position: absolute; top: -.2rem; bottom: -.2rem; width: 2px; background: var(--fg); opacity: .55; }
 .num { width: 6.5rem; text-align: right; font-variant-numeric: tabular-nums; }
 .num em { font-style: normal; color: var(--dim); }
 footer { margin-top: 3rem; color: var(--dim); font-size: .85rem; }
-@media (max-width: 560px) { .bars td:nth-child(2) { display: none; } }
+@media (max-width: 560px) { .num { width: 5.6rem; } }
 </style>
 </head>
 <body>
 <main>
 <h1>abacus, one commit at a time</h1>
-<p class="lede">abacus is a CPU inference engine for Qwen3 in {{lines}} lines of C. It started as a
-float32 loop and got faster one commit at a time. These are the {{count}} commits that touch the engine:
-what each one does, the lines that do it, and its tokens per second on Qwen3-0.6B. Bars are on a log
-scale from 1 token/s; the tick marks the step before.</p>
-<p class="lede">Code and results: <a href="https://github.com/mottopanikeiku/abacus">github.com/mottopanikeiku/abacus</a>.</p>
+<p class="lede">abacus is a CPU inference engine for Qwen3 in {{lines}} lines of C, which started as a
+float32 loop and got faster one commit at a time. This page goes through the {{count}} commits that touch
+the engine, with what each one does, the lines that do it and the tokens per second it reached on
+Qwen3-0.6B. The bars use a log scale that starts at 1 token/s, and the tick on each bar marks the step
+before.</p>
+<p class="lede">The code and the saved results live at <a href="https://github.com/mottopanikeiku/abacus">github.com/mottopanikeiku/abacus</a>.</p>
 {{steps}}
-<footer>Decode is 128 tokens, prefill a 128-token prompt; each bar is the median of interleaved runs from
-<code>bench/run.py</code>, saved in <code>results/</code> (Graviton4, steps 1 to 13), <code>results/x86/</code> and
-<code>results/arm/</code> (GitHub-hosted runners, from step 13 on). Generated by <code>walkthrough/build.py</code>.</footer>
+<footer>Decode is 128 tokens and prefill a 128-token prompt, and each bar is the median of interleaved
+runs from <code>bench/run.py</code>. The Graviton4 numbers in <code>results/</code> cover steps 1 to 13,
+and the GitHub-hosted runners in <code>results/runners/</code> cover step 13 onwards. The page itself is
+generated by <code>walkthrough/build.py</code>.</footer>
 </main>
 </body>
 </html>
