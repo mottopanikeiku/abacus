@@ -2,7 +2,10 @@
 
 usage: uv run bench/report.py [RESULTS_DIR] [THREADS, e.g. 1,4,8]
 
-Every number is a median over repetitions with a 95% bootstrap interval.
+Every number is a median over repetitions with a 95% bootstrap interval. When
+raw.jsonl holds more than one benchmark job (the "run" field), the medians pool
+them, and a last table sets the jobs side by side for the newest commit and
+llama.cpp.
 """
 import json
 import sys
@@ -38,6 +41,7 @@ def main():
     rows = [r for r in rows if keep is None or r["threads"] in keep]
     pp, tg = rows[0]["pp"], rows[0]["tg"]
     threads = sorted({r["threads"] for r in rows})
+    runs = sorted({r.get("run", "") for r in rows})
     samples = defaultdict(list)
     labels = {}
     for r in rows:  # abacus runs are keyed (step, flags), llama.cpp runs by label
@@ -45,6 +49,7 @@ def main():
         labels[key] = r["label"]
         for metric, _ in METRICS:
             samples[key, r["threads"], metric].append(r[metric])
+            samples[key, r["threads"], metric, r.get("run", "")].append(r[metric])
         if r.get("load_s") is not None:
             samples[key, r["threads"], "load_s"].append(r["load_s"])
     stats = {k: median_ci(v) for k, v in samples.items()}
@@ -62,7 +67,8 @@ def main():
             cells = [f"{stats[k, t, 'load_s'][0]:.2f} [{stats[k, t, 'load_s'][1]:.2f}, {stats[k, t, 'load_s'][2]:.2f}]"
                      for t in threads]
             load_lines.append(f"| {k[0] + 1} | {labels[k]} | " + " | ".join(cells) + " |")
-    lines = [f"Qwen3-0.6B, {pp}-token prefill and {tg}-token decode. Median tokens/s of {reps} interleaved runs; "
+    jobs = f" from {len(runs)} separate benchmark jobs" if len(runs) > 1 else ""
+    lines = [f"Qwen3-0.6B, {pp}-token prefill and {tg}-token decode. Median tokens/s of {reps} interleaved runs{jobs}; "
              "brackets are 95% bootstrap intervals.", ""]
     for metric, name in METRICS:
         lines += [f"## {name} tokens/s", "", "| # | Commit | " + " | ".join(f"{t} thr" for t in threads) + " |",
@@ -85,6 +91,20 @@ def main():
         lines.append(f"| {t} | " + " | ".join(f"{r:.2f}x" for r in ratios) + " |")
     if loads:
         lines += [""] + load_lines
+    if len(runs) > 1:
+        lines += ["", "## Job to job", "", "Each benchmark job on its own, for the newest commit and llama.cpp. "
+                  "\"apart\" marks a cell whose intervals don't overlap with the other jobs'.", "",
+                  "| Runner | Threads | " + " | ".join(f"{name}, job {j + 1}" for _, name in METRICS
+                                                        for j in range(len(runs))) + " |",
+                  "|---|---:|" + "---:|" * (len(METRICS) * len(runs))]
+        for key in [steps[-1]] + q4[-1:] + llama:
+            for t in threads:
+                cells = []
+                for metric, _ in METRICS:
+                    per = [stats[key, t, metric, run] for run in runs]
+                    apart = max(lo for _, lo, _ in per) > min(hi for _, _, hi in per)
+                    cells += [f"{fmt(m)} [{fmt(lo)}, {fmt(hi)}]" + (" apart" if apart else "") for m, lo, hi in per]
+                lines.append(f"| {labels[key]} | {t} | " + " | ".join(cells) + " |")
     (out / "table.md").write_text("\n".join(lines) + "\n")
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 5.8), sharex=True)

@@ -7,7 +7,7 @@ Steps:
   2. run tools/check.py against each build (skip with --skip-check)
   3. build llama.cpp at LLAMA_COMMIT and convert the model to GGUF
   4. for each repetition and thread count, run every commit and every llama.cpp
-     format once, in a fresh random order, pinned to cores 0..threads-1
+     format once, in a fresh random order, pinned to cores 0..threads-1 on Linux
   5. append one JSON line per run to results/raw.jsonl and call bench/report.py
 """
 import argparse
@@ -16,6 +16,7 @@ import json
 import os
 import platform
 import random
+import shutil
 import subprocess
 import sys
 import time
@@ -25,6 +26,12 @@ ROOT = Path(__file__).resolve().parent.parent
 CACHE = ROOT / ".cache"
 LLAMA_COMMIT = "785322d17f2d51e5185cf996a1f4e46d87640841"
 LLAMA_FORMATS = ["Q8_0", "Q4_0"]
+MAC = platform.system() == "Darwin"
+
+
+def pin(cpus):
+    """Linux pins runs to cores; macOS has no way to, so its runs float."""
+    return ["taskset", "-c", cpus] if shutil.which("taskset") else []
 
 
 def sh(cmd, **kw):
@@ -57,8 +64,10 @@ def setup_llama(model_dir, gguf_dir):
     sh(["git", "-C", src, "checkout", "-q", LLAMA_COMMIT])
     bench = src / "build" / "bin" / "llama-bench"
     if not bench.exists():
+        # CPU only: on macOS that means no Metal and no Accelerate (BLAS)
+        mac = ["-DGGML_METAL=OFF", "-DGGML_BLAS=OFF"] if MAC else []
         sh(["cmake", "-S", src, "-B", src / "build", "-DCMAKE_BUILD_TYPE=Release", "-DGGML_NATIVE=ON",
-            "-DLLAMA_CURL=OFF", "-DLLAMA_BUILD_TESTS=OFF", "-DLLAMA_BUILD_SERVER=OFF"])
+            "-DLLAMA_CURL=OFF", "-DLLAMA_BUILD_TESTS=OFF", "-DLLAMA_BUILD_SERVER=OFF", *mac])
         sh(["cmake", "--build", src / "build", "-j", str(os.cpu_count()), "--target", "llama-bench", "llama-quantize"])
     gguf_dir.mkdir(parents=True, exist_ok=True)
     name = model_dir.name
@@ -74,7 +83,7 @@ def setup_llama(model_dir, gguf_dir):
 
 
 def run_abacus(binary, model, threads, pp, tg, flags):
-    out = sh(["taskset", "-c", f"0-{threads - 1}", binary, model, *flags, "--bench", str(pp), str(tg)])
+    out = sh([*pin(f"0-{threads - 1}"), binary, model, *flags, "-t", str(threads), "--bench", str(pp), str(tg)])
     r = json.loads(out)
     return r["prefill_tok_s"], r["decode_tok_s"]
 
@@ -86,7 +95,7 @@ def variants(binary):
 
 
 def run_llama(bench, gguf, threads, pp, tg):
-    out = sh(["taskset", "-c", f"0-{threads - 1}", bench, "-m", gguf, "-t", str(threads), "-p", str(pp),
+    out = sh([*pin(f"0-{threads - 1}"), bench, "-m", gguf, "-t", str(threads), "-p", str(pp),
               "-n", str(tg), "-r", "1", "-o", "jsonl"])
     rows = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
     pp_ts = next(r["avg_ts"] for r in rows if r["n_gen"] == 0)
@@ -95,8 +104,11 @@ def run_llama(bench, gguf, threads, pp, tg):
 
 
 def machine(info):
-    cpu = next((line.split(":", 1)[1].strip() for line in sh(["lscpu"]).splitlines()
-                if line.startswith("Model name")), platform.processor())
+    if MAC:
+        cpu = sh(["sysctl", "-n", "machdep.cpu.brand_string"]).strip()
+    else:
+        cpu = next((line.split(":", 1)[1].strip() for line in sh(["lscpu"]).splitlines()
+                    if line.startswith("Model name")), platform.processor())
     return {"cpu": cpu, "cores": os.cpu_count(), "kernel": platform.release(),
             "compiler": sh(["cc", "--version"]).splitlines()[0], "llama_cpp": LLAMA_COMMIT, "abacus": info}
 
@@ -130,7 +142,7 @@ def main():
         checks, report = [], args.out / "check.tmp.json"
         for i, (sha, tree, name) in steps:
             for flags in variants(binaries[sha]):
-                ok = subprocess.run(["taskset", "-c", args.check_cpus, sys.executable, ROOT / "tools" / "check.py",
+                ok = subprocess.run([*pin(args.check_cpus), sys.executable, ROOT / "tools" / "check.py",
                                      binaries[sha], model, args.ref, *flags, "--json", report]).returncode == 0
                 checks.append({"index": i, "tree": tree, "step": name, "flags": " ".join(flags),
                                **json.loads(report.read_text())})
@@ -162,7 +174,7 @@ def main():
                 load_s = None
                 if kind == "abacus":
                     start = time.perf_counter()  # loading the model, quantization included
-                    sh(["taskset", "-c", f"0-{t - 1}", binaries[key], model, *flags, "--info"])
+                    sh([*pin(f"0-{t - 1}"), binaries[key], model, *flags, "-t", str(t), "--info"])
                     load_s = time.perf_counter() - start
                     pp_ts, tg_ts = run_abacus(binaries[key], model, t, args.pp, args.tg, flags)
                 else:
@@ -170,7 +182,7 @@ def main():
                 row = {"runner": kind, "index": index, "tree": tree, "label": label, "flags": " ".join(flags),
                        "threads": t, "rep": rep, "pp": args.pp, "tg": args.tg, "prefill_tok_s": pp_ts,
                        "decode_tok_s": tg_ts, "load_s": load_s, "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                       "load": round(os.getloadavg()[0], 2)}
+                       "load": round(os.getloadavg()[0], 2), "run": os.environ.get("GITHUB_RUN_ID", "local")}
                 raw.write(json.dumps(row) + "\n")
                 raw.flush()
                 print(f"rep {rep} t={t:2d} {label[:44]:44s} prefill {pp_ts:8.1f}  decode {tg_ts:7.1f}")
