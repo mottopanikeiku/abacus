@@ -192,65 +192,105 @@ static void attention_head(const Model *m, int layer, const float *q, float *out
     }
 }
 
-typedef struct {
-    const Model *m;
+// One layer step over a batch: which layer, where the batch starts, and the
+// per-token function to run.
+typedef struct Step Step;
+struct Step {
+    Model *m;
+    const Layer *L;
     int layer, pos, n;
-} Attention;
+    const float *norm; // for add_norm
+    int add;           // for add_norm
+    void (*row)(const Step *s, int i);
+};
+
+static void rows_task(void *arg, int thread, int n_threads) {
+    const Step *s = arg;
+    for (int i = s->n * thread / n_threads; i < s->n * (thread + 1) / n_threads; i++) s->row(s, i);
+}
+
+// Runs row(s, i) for every token of the batch, spread over the threads.
+static void for_each_token(Step *s, void (*row)(const Step *s, int i)) {
+    s->row = row;
+    if (s->n == 1) row(s, 0); // not worth waking the team
+    else pool_run(rows_task, s);
+}
+
+// x += the last block's output (left in xn), then xn = rmsnorm(x).
+static void add_norm(const Step *s, int i) {
+    int dim = s->m->c.dim;
+    float *x = s->m->x + (size_t)i * dim, *xn = s->m->xn + (size_t)i * dim;
+    if (s->add)
+        for (int j = 0; j < dim; j++) x[j] += xn[j];
+    rmsnorm(xn, x, s->norm, dim, s->m->c.norm_eps);
+}
+
+// Normalize each query and key head, rotate them, append k and v to the cache.
+static void rotate_and_cache(const Step *s, int i) {
+    const Config *c = &s->m->c;
+    int hd = c->head_dim, q_dim = c->n_heads * hd, kv_dim = c->n_kv_heads * hd, pos = s->pos + i;
+    float *q = s->m->qkv + (size_t)i * (q_dim + 2 * kv_dim), *k = q + q_dim, *v = k + kv_dim;
+    for (int h = 0; h < c->n_heads; h++) rmsnorm(q + h * hd, q + h * hd, s->L->q_norm, hd, c->norm_eps);
+    for (int h = 0; h < c->n_kv_heads; h++) rmsnorm(k + h * hd, k + h * hd, s->L->k_norm, hd, c->norm_eps);
+    rope(q, c->n_heads, hd, pos, c->rope_theta);
+    rope(k, c->n_kv_heads, hd, pos, c->rope_theta);
+    size_t at = ((size_t)s->layer * c->seq_len + pos) * kv_dim;
+    memcpy(s->m->k_cache + at, k, kv_dim * sizeof(float));
+    memcpy(s->m->v_cache + at, v, kv_dim * sizeof(float));
+}
 
 // Every (token, head) pair in the batch is an independent job.
 static void attention_jobs(void *arg, int thread, int n_threads) {
-    const Attention *a = arg;
-    const Config *c = &a->m->c;
+    const Step *s = arg;
+    const Config *c = &s->m->c;
     int q_dim = c->n_heads * c->head_dim, qkv_dim = q_dim + 2 * c->n_kv_heads * c->head_dim;
-    int jobs = a->n * c->n_heads;
+    int jobs = s->n * c->n_heads;
     for (int j = jobs * thread / n_threads; j < jobs * (thread + 1) / n_threads; j++) {
         int i = j / c->n_heads, h = j % c->n_heads;
-        attention_head(a->m, a->layer, a->m->qkv + (size_t)i * qkv_dim, a->m->att + (size_t)i * q_dim, h, a->pos + i);
+        attention_head(s->m, s->layer, s->m->qkv + (size_t)i * qkv_dim, s->m->att + (size_t)i * q_dim, h, s->pos + i);
+    }
+}
+
+// act = silu(gate) * up, split by element so that one token is spread too.
+static void swiglu(void *arg, int thread, int n_threads) {
+    const Step *s = arg;
+    int hidden = s->m->c.hidden_dim;
+    size_t total = (size_t)s->n * hidden;
+    for (size_t e = total * thread / n_threads; e < total * (thread + 1) / n_threads; e++) {
+        const float *gate = s->m->gate_up + e / hidden * 2 * hidden + e % hidden, *up = gate + hidden;
+        s->m->act[e] = *gate / (1.0f + expf(-*gate)) * *up;
     }
 }
 
 // Runs n <= BATCH tokens through every layer at once, so each weight is read
-// once per batch instead of once per token. Leaves the final hidden states in m->x.
+// once per batch instead of once per token. Leaves the final hidden states in m->xn.
 static void forward_batch(Model *m, const int *tokens, int n, int pos) {
     const Config *c = &m->c;
-    int dim = c->dim, hd = c->head_dim, hidden = c->hidden_dim;
-    int q_dim = c->n_heads * hd, kv_dim = c->n_kv_heads * hd, qkv_dim = q_dim + 2 * kv_dim;
-    float *x = m->x, *xn = m->xn;
-
+    int dim = c->dim;
+    Step s = {.m = m, .pos = pos, .n = n};
     for (int i = 0; i < n; i++)
-        for (int j = 0; j < dim; j++) x[(size_t)i * dim + j] = bf16_to_f32(m->embed[(size_t)tokens[i] * dim + j]);
+        for (int j = 0; j < dim; j++) m->x[(size_t)i * dim + j] = bf16_to_f32(m->embed[(size_t)tokens[i] * dim + j]);
     for (int l = 0; l < c->n_layers; l++) {
-        const Layer *L = &m->layers[l];
+        const Layer *L = s.L = &m->layers[l];
+        s.layer = l;
 
         // attention: project, normalize each head, rotate, append to the cache
-        for (int i = 0; i < n; i++) rmsnorm(xn + (size_t)i * dim, x + (size_t)i * dim, L->attn_norm, dim, c->norm_eps);
-        matmul(m->qkv, xn, n, &L->wqkv);
-        for (int i = 0; i < n; i++) {
-            float *q = m->qkv + (size_t)i * qkv_dim, *k = q + q_dim, *v = k + kv_dim;
-            for (int h = 0; h < c->n_heads; h++) rmsnorm(q + h * hd, q + h * hd, L->q_norm, hd, c->norm_eps);
-            for (int h = 0; h < c->n_kv_heads; h++) rmsnorm(k + h * hd, k + h * hd, L->k_norm, hd, c->norm_eps);
-            rope(q, c->n_heads, hd, pos + i, c->rope_theta);
-            rope(k, c->n_kv_heads, hd, pos + i, c->rope_theta);
-            size_t at = ((size_t)l * c->seq_len + pos + i) * kv_dim;
-            memcpy(m->k_cache + at, k, kv_dim * sizeof(float));
-            memcpy(m->v_cache + at, v, kv_dim * sizeof(float));
-        }
-        Attention att = {m, l, pos, n};
-        pool_run(attention_jobs, &att);
-        matmul(xn, m->att, n, &L->wo);
-        for (size_t i = 0; i < (size_t)n * dim; i++) x[i] += xn[i];
+        s.norm = L->attn_norm, s.add = l > 0;
+        for_each_token(&s, add_norm);
+        matmul(m->qkv, m->xn, n, &L->wqkv);
+        for_each_token(&s, rotate_and_cache);
+        pool_run(attention_jobs, &s);
+        matmul(m->xn, m->att, n, &L->wo);
 
         // MLP: down(silu(gate(x)) * up(x))
-        for (int i = 0; i < n; i++) rmsnorm(xn + (size_t)i * dim, x + (size_t)i * dim, L->ffn_norm, dim, c->norm_eps);
-        matmul(m->gate_up, xn, n, &L->w_gate_up);
-        for (int i = 0; i < n; i++) {
-            const float *gate = m->gate_up + (size_t)i * 2 * hidden, *up = gate + hidden;
-            for (int j = 0; j < hidden; j++) m->act[(size_t)i * hidden + j] = gate[j] / (1.0f + expf(-gate[j])) * up[j];
-        }
-        matmul(xn, m->act, n, &L->w_down);
-        for (size_t i = 0; i < (size_t)n * dim; i++) x[i] += xn[i];
+        s.norm = L->ffn_norm, s.add = 1;
+        for_each_token(&s, add_norm);
+        matmul(m->gate_up, m->xn, n, &L->w_gate_up);
+        pool_run(swiglu, &s);
+        matmul(m->xn, m->act, n, &L->w_down);
     }
-    for (int i = 0; i < n; i++) rmsnorm(x + (size_t)i * dim, x + (size_t)i * dim, m->norm, dim, c->norm_eps);
+    s.norm = m->norm, s.add = 1;
+    for_each_token(&s, add_norm);
 }
 
 void forward(Model *m, const int *tokens, int n, int pos, float *logits, int n_logits) {
@@ -262,7 +302,7 @@ void forward(Model *m, const int *tokens, int n, int pos, float *logits, int n_l
         // logits for the rows of this batch that are among the last n_logits
         int first = start > n - n_logits ? start : n - n_logits;
         if (first < start + len)
-            matmul(logits + (size_t)(first - (n - n_logits)) * c->vocab_size, m->x + (size_t)(first - start) * c->dim,
+            matmul(logits + (size_t)(first - (n - n_logits)) * c->vocab_size, m->xn + (size_t)(first - start) * c->dim,
                    start + len - first, &m->lm_head);
     }
 }
