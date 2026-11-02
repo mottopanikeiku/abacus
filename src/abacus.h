@@ -83,6 +83,21 @@ int tokenizer_is_special(const Tokenizer *t, int id);
 
 QMatrix quantize_matrix(const bf16 *w, int rows, int cols);
 void matmul(float *out, const float *x, int n, const QMatrix *w); // out[n, rows] = x[n, cols] @ w^T
+const char *matmul_kernels(void);                                 // name of the kernels in use
+
+#define BLOCK 32 // values that share one scale
+
+// Kernels for one kind of CPU. x1 multiplies row group g of m (rows 4g to
+// 4g+3) by one token: x is the token quantized, xd its block scales. x4, if
+// there is one, multiplies groups g and g+1 by four tokens stored one after
+// another, writing out with row stride ldo. matmul.c has plain C; cpu_kernels
+// (neon.c, x86.c) swaps in faster ones when this CPU has them.
+typedef struct {
+    const char *name;
+    void (*x1)(float *out, const QMatrix *m, int g, const int8_t *x, const float *xd);
+    void (*x4)(float *out, int ldo, const QMatrix *m, int g, const int8_t *x, const float *xd);
+} Kernels;
+void cpu_kernels(Kernels *k);
 
 // Thread pool: run fn(arg, i, n) on each of n threads and wait for all of them.
 typedef void (*Task)(void *arg, int thread, int n_threads);

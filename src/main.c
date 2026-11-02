@@ -139,8 +139,8 @@ int main(int argc, char **argv) {
     float *logits = malloc(vocab * sizeof(float));
 
     if (info) {
-        printf("qwen3 dim=%d hidden=%d layers=%d heads=%d/%d head_dim=%d vocab=%d weights=q8_0\n", c->dim,
-               c->hidden_dim, c->n_layers, c->n_heads, c->n_kv_heads, c->head_dim, vocab);
+        printf("qwen3 dim=%d hidden=%d layers=%d heads=%d/%d head_dim=%d vocab=%d weights=q8_0 kernels=%s\n", c->dim,
+               c->hidden_dim, c->n_layers, c->n_heads, c->n_kv_heads, c->head_dim, vocab, matmul_kernels());
     } else if (text) {
         int n = tokenizer_encode(&m->tok, text, tokens, c->seq_len);
         for (int i = 0; i < n; i++) printf(i ? " %d" : "%d", tokens[i]);

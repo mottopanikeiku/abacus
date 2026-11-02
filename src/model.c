@@ -132,7 +132,8 @@ void model_free(Model *m) {
 // ---------------------------------------------------------------- math
 
 // Sum of a[i] * b[i]. A single running sum waits on every multiply-add; NEON
-// keeps four 4-wide sums in flight instead.
+// keeps four 4-wide sums in flight instead. Elsewhere two 8-wide sums in GCC's
+// vector extension become whatever vectors the target has.
 static float dot(const float *a, const float *b, int n) {
     float sum = 0.0f;
     int i = 0;
@@ -145,6 +146,15 @@ static float dot(const float *a, const float *b, int n) {
         s3 = vfmaq_f32(s3, vld1q_f32(a + i + 12), vld1q_f32(b + i + 12));
     }
     sum = vaddvq_f32(vaddq_f32(vaddq_f32(s0, s1), vaddq_f32(s2, s3)));
+#else
+    typedef float v8 __attribute__((vector_size(32)));
+    v8 s0 = {0}, s1 = {0}, va, vb;
+    for (; i + 16 <= n; i += 16) {
+        memcpy(&va, a + i, 32), memcpy(&vb, b + i, 32), s0 += va * vb;
+        memcpy(&va, a + i + 8, 32), memcpy(&vb, b + i + 8, 32), s1 += va * vb;
+    }
+    s0 += s1;
+    for (int j = 0; j < 8; j++) sum += s0[j];
 #endif
     for (; i < n; i++) sum += a[i] * b[i];
     return sum;

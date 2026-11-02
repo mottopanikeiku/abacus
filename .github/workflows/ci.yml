@@ -18,6 +18,28 @@ jobs:
       - run: ./abacus tiny.bin --info
       - run: uv run tools/check.py ./abacus tiny.bin ref-tiny
 
+  x86-kernels:
+    # one portable build, run as several CPU generations under Intel's emulator,
+    # so that each x86 kernel gets picked at startup and checked (24.04: newer
+    # images ship a glibc that needs AVX2 itself)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: petarpetrovt/setup-sde@31aa4a8e85e109bef00f1d838613fcc6ec421271 # v5.0
+        with:
+          environmentVariableName: SDE_PATH
+          sdeVersion: 9.58.0
+      - run: make ARCH=
+      - run: uv run tools/tiny.py tiny && python3 tools/export.py tiny tiny.bin && uv run tools/reference.py tiny ref-tiny
+      - run: |
+          for cpu in snb hsw; do
+            printf '#!/bin/sh\nexec "%s/sde64" -%s -- ./abacus "$@"\n' "$SDE_PATH" $cpu > sde-abacus
+            chmod +x sde-abacus
+            ./sde-abacus tiny.bin --info
+            uv run tools/check.py ./sde-abacus tiny.bin ref-tiny
+          done
+
   qwen3:
     # the real Qwen3-0.6B, checked against transformers in float32
     strategy:
