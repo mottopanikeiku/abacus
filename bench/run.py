@@ -94,11 +94,11 @@ def run_llama(bench, gguf, threads, pp, tg):
     return pp_ts, tg_ts
 
 
-def machine():
+def machine(info):
     cpu = next((line.split(":", 1)[1].strip() for line in sh(["lscpu"]).splitlines()
                 if line.startswith("Model name")), platform.processor())
     return {"cpu": cpu, "cores": os.cpu_count(), "kernel": platform.release(),
-            "compiler": sh(["cc", "--version"]).splitlines()[0], "llama_cpp": LLAMA_COMMIT}
+            "compiler": sh(["cc", "--version"]).splitlines()[0], "llama_cpp": LLAMA_COMMIT, "abacus": info}
 
 
 def main():
@@ -152,19 +152,24 @@ def main():
     while os.getloadavg()[0] > args.max_load:  # a busy machine slows spinning thread pools a lot
         print(f"load average {os.getloadavg()[0]:.1f} > {args.max_load}, waiting")
         time.sleep(60)
-    (args.out / "machine.json").write_text(json.dumps(machine(), indent=1))
+    last = binaries[steps[-1][1][0]]
+    (args.out / "machine.json").write_text(json.dumps(machine(sh([last, model, "--info"]).strip()), indent=1))
     raw = open(args.out / "raw.jsonl", "w")
     print(f"load average {os.getloadavg()[0]:.1f}; {len(runners) * len(threads) * args.reps} runs")
     for rep in range(args.reps):
         for t in threads:
             for kind, index, key, tree, label, flags in random.sample(runners, len(runners)):
+                load_s = None
                 if kind == "abacus":
+                    start = time.perf_counter()  # loading the model, quantization included
+                    sh(["taskset", "-c", f"0-{t - 1}", binaries[key], model, *flags, "--info"])
+                    load_s = time.perf_counter() - start
                     pp_ts, tg_ts = run_abacus(binaries[key], model, t, args.pp, args.tg, flags)
                 else:
                     pp_ts, tg_ts = run_llama(bench, ggufs[key], t, args.pp, args.tg)
                 row = {"runner": kind, "index": index, "tree": tree, "label": label, "flags": " ".join(flags),
                        "threads": t, "rep": rep, "pp": args.pp, "tg": args.tg, "prefill_tok_s": pp_ts,
-                       "decode_tok_s": tg_ts, "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                       "decode_tok_s": tg_ts, "load_s": load_s, "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
                        "load": round(os.getloadavg()[0], 2)}
                 raw.write(json.dumps(row) + "\n")
                 raw.flush()

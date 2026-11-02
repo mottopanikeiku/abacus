@@ -45,12 +45,23 @@ def main():
         labels[key] = r["label"]
         for metric, _ in METRICS:
             samples[key, r["threads"], metric].append(r[metric])
+        if r.get("load_s") is not None:
+            samples[key, r["threads"], "load_s"].append(r["load_s"])
     stats = {k: median_ci(v) for k, v in samples.items()}
     steps = sorted(k for k in labels if isinstance(k, tuple) and not k[1])
     q4 = sorted(k for k in labels if isinstance(k, tuple) and k[1])
     llama = sorted(k for k in labels if isinstance(k, str))
     reps = len(samples[steps[0], threads[0], "decode_tok_s"])
 
+    loads = [k for k in steps + q4 if (k, threads[0], "load_s") in stats]
+    if loads:  # appended after the speed tables below
+        load_lines = ["## Load seconds (model.bin, quantization included)", "",
+                      "| # | Commit | " + " | ".join(f"{t} thr" for t in threads) + " |",
+                      "|---:|---|" + "---:|" * len(threads)]
+        for k in loads:
+            cells = [f"{stats[k, t, 'load_s'][0]:.2f} [{stats[k, t, 'load_s'][1]:.2f}, {stats[k, t, 'load_s'][2]:.2f}]"
+                     for t in threads]
+            load_lines.append(f"| {k[0] + 1} | {labels[k]} | " + " | ".join(cells) + " |")
     lines = [f"Qwen3-0.6B, {pp}-token prefill and {tg}-token decode. Median tokens/s of {reps} interleaved runs; "
              "brackets are 95% bootstrap intervals.", ""]
     for metric, name in METRICS:
@@ -72,6 +83,8 @@ def main():
     for t in threads:
         ratios = [stats[a, t, metric][0] / stats[b, t, metric][0] for a, b in pairs for metric, _ in METRICS]
         lines.append(f"| {t} | " + " | ".join(f"{r:.2f}x" for r in ratios) + " |")
+    if loads:
+        lines += [""] + load_lines
     (out / "table.md").write_text("\n".join(lines) + "\n")
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 5.8), sharex=True)
