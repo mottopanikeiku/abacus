@@ -1,14 +1,29 @@
-// NEON kernels for arm64: SDOT for one token, SMMLA (i8mm) for four. Both
-// read the 4-row groups described in matmul.c.
+// NEON kernels for arm64: SDOT (dotprod) for one token, SMMLA (i8mm) for
+// four. Both read the 4-row groups described in matmul.c. Each function turns
+// its extension on for itself, so any arm64 build has them, and cpu_kernels
+// asks the OS which ones this CPU runs: Apple M1 and Graviton2 have SDOT but
+// not SMMLA.
 #ifdef __aarch64__
 #include "abacus.h"
 #include <arm_neon.h>
+#ifdef __APPLE__
+#include <sys/sysctl.h>
+#elif defined(__linux__)
+#include <sys/auxv.h>
+#endif
 
-#ifdef __ARM_FEATURE_DOTPROD
+#ifdef __clang__
+#define DOTPROD __attribute__((target("dotprod")))
+#define I8MM __attribute__((target("dotprod,i8mm")))
+#else
+#define DOTPROD __attribute__((target("+dotprod")))
+#define I8MM __attribute__((target("+dotprod+i8mm")))
+#endif
+
 // One group (4 rows) times one token. SDOT multiplies 16 int8 pairs into four
 // int32 lanes; fed 8 bytes of two rows against the same 8 inputs twice, its
 // lanes hold (row 0, row 0, row 1, row 1).
-static void x1_sdot(float *out, const QMatrix *m, int g, const int8_t *x, const float *xd) {
+DOTPROD static void x1_sdot(float *out, const QMatrix *m, int g, const int8_t *x, const float *xd) {
     int blocks = m->cols / BLOCK;
     const int8_t *q = m->q + (size_t)g * blocks * 128;
     const f16 *d = m->d + (size_t)g * blocks * 4;
@@ -27,15 +42,13 @@ static void x1_sdot(float *out, const QMatrix *m, int g, const int8_t *x, const 
     }
     vst1q_f32(out, vpaddq_f32(acc01, acc23));
 }
-#endif
 
-#ifdef __ARM_FEATURE_MATMUL_INT8
 // Two groups (8 rows) times four tokens. SMMLA multiplies a 2x8 int8 matrix
 // by the transpose of another 2x8 one and adds the 2x2 int32 result: two rows
 // times two tokens, eight deep, twice the work of an SDOT. The tile is 4 row
 // pairs by 2 token pairs, so each loaded input feeds four SMMLAs. out has row
 // stride ldo.
-static void x4_smmla(float *out, int ldo, const QMatrix *m, int g, const int8_t *x, const float *xd) {
+I8MM static void x4_smmla(float *out, int ldo, const QMatrix *m, int g, const int8_t *x, const float *xd) {
     int blocks = m->cols / BLOCK, cols = m->cols;
     const int8_t *q = m->q + (size_t)g * blocks * 128;
     const f16 *d = m->d + (size_t)g * blocks * 4;
@@ -81,15 +94,24 @@ static void x4_smmla(float *out, int ldo, const QMatrix *m, int g, const int8_t 
             out[(size_t)(2 * t + 1) * ldo + 2 * p + 1] = v[3];
         }
 }
+
+#ifdef __APPLE__
+static int has(const char *feature) {
+    int on = 0;
+    size_t size = sizeof on;
+    return sysctlbyname(feature, &on, &size, NULL, 0) == 0 && on;
+}
 #endif
 
 void cpu_kernels(Kernels *k) {
-#ifdef __ARM_FEATURE_DOTPROD
-    *k = (Kernels){"neon dotprod", x1_sdot, NULL};
+#ifdef __APPLE__
+    int dotprod = has("hw.optional.arm.FEAT_DotProd"), i8mm = has("hw.optional.arm.FEAT_I8MM");
+#elif defined(__linux__)
+    int dotprod = !!(getauxval(AT_HWCAP) & HWCAP_ASIMDDP), i8mm = !!(getauxval(AT_HWCAP2) & HWCAP2_I8MM);
+#else
+    int dotprod = 0, i8mm = 0;
 #endif
-#ifdef __ARM_FEATURE_MATMUL_INT8
-    *k = (Kernels){"neon i8mm", x1_sdot, x4_smmla};
-#endif
-    (void)k;
+    if (dotprod) *k = (Kernels){"neon dotprod", x1_sdot, NULL};
+    if (dotprod && i8mm) *k = (Kernels){"neon i8mm", x1_sdot, x4_smmla};
 }
 #endif
