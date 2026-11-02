@@ -45,9 +45,10 @@ static inline float bf16_to_f32(bf16 h) {
 
 // int8 weights in blocks of 32 along each row, one f16 scale per block: the
 // numbers of llama.cpp's Q8_0, with values and scales in separate arrays.
+// Rows are interleaved in groups of 4; matmul.c describes the layout.
 typedef struct {
-    int8_t *q; // [rows, cols]
-    f16 *d;    // [rows, cols / 32]
+    int8_t *q; // [rows / 4][cols / 32][128]
+    f16 *d;    // [rows / 4][cols / 32][4]
     int rows, cols;
 } QMatrix;
 
