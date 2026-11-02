@@ -1,0 +1,7 @@
+{
+ "cpu": "Neoverse-V2",
+ "cores": 16,
+ "kernel": "7.0.0-1014-aws",
+ "compiler": "cc (Ubuntu 15.2.0-16ubuntu1) 15.2.0",
+ "llama_cpp": "785322d17f2d51e5185cf996a1f4e46d87640841"
+}
