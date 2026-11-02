@@ -2,6 +2,7 @@
 *.bin
 /models/
 /ref/
+/ref-*/
 /.cache/
 /.venv/
 __pycache__/
