@@ -6,7 +6,8 @@
 // AVX2 has no int8 x int8 dot product. VPMADDUBSW multiplies unsigned bytes
 // by signed ones and adds neighbours into int16, so the weights lend their
 // signs to the inputs, |w| * (x * sign w) = w * x, and VPMADDWD adds the int16
-// pairs into int32. |x| <= 127 keeps the int16 sums from saturating.
+// pairs into int32. |w| <= 128 and |x| <= 127 keep the int16 sums from
+// saturating.
 //
 // VNNI's VPDPBUSD does the multiply, both additions and the accumulation in
 // one instruction. AVX-VNNI (Alder Lake, Zen 5) and AVX-512 VNNI (Ice Lake,
@@ -49,44 +50,53 @@ AVX2 static inline __m256 row_scales(const f16 *d) {
     return _mm256_permutevar8x32_ps(_mm256_castps128_ps256(s), _mm256_setr_epi32(0, 0, 1, 1, 2, 2, 3, 3));
 }
 
-// out[r] = lane 2r + lane 2r+1
-AVX2 static inline void store_rows(float *out, __m256 acc) {
+// out[r] = lane 2r + lane 2r+1, divided by 16 for 4-bit weights
+AVX2 static inline void store_rows(float *out, __m256 acc, int bits) {
     __m256 s = _mm256_hadd_ps(acc, acc); // r0 r1 r0 r1 | r2 r3 r2 r3
-    _mm_storeu_ps(out, _mm_movelh_ps(_mm256_castps256_ps128(s), _mm256_extractf128_ps(s, 1)));
+    __m128 rows = _mm_movelh_ps(_mm256_castps256_ps128(s), _mm256_extractf128_ps(s, 1));
+    _mm_storeu_ps(out, bits == 4 ? _mm_mul_ps(rows, _mm_set1_ps(1.0f / 16)) : rows);
+}
+
+// Chunk c (0..3) of a group's block of weights: 8 columns of the 4 rows.
+// 4-bit weights come out 16 times too big.
+AVX2 static inline __m256i weights(const int8_t *q, int bits, int c) {
+    if (bits == 8) return _mm256_loadu_si256((const __m256i *)(q + 32 * c));
+    __m256i packed = _mm256_loadu_si256((const __m256i *)(q + 32 * (c % 2)));
+    return _mm256_and_si256(c < 2 ? _mm256_slli_epi16(packed, 4) : packed, _mm256_set1_epi8((char)0xF0));
 }
 
 // One group (4 rows) times one token.
 AVX2 static inline __attribute__((always_inline)) void x1(float *out, const QMatrix *m, int g, const int8_t *x,
-                                                          const float *xd, Dot *dot) {
-    int blocks = m->cols / BLOCK;
-    const int8_t *q = m->q + (size_t)g * blocks * 128;
+                                                          const float *xd, Dot *dot, int bits) {
+    int blocks = m->cols / BLOCK, bytes = 16 * bits;
+    const int8_t *q = m->q + (size_t)g * blocks * bytes;
     const f16 *d = m->d + (size_t)g * blocks * 4;
     __m256 acc = _mm256_setzero_ps();
-    for (int b = 0; b < blocks; b++, q += 128, d += 4, x += BLOCK) {
+    for (int b = 0; b < blocks; b++, q += bytes, d += 4, x += BLOCK) {
         __m256i s = _mm256_setzero_si256();
         for (int c = 0; c < 4; c++) {
-            __m256i w = _mm256_loadu_si256((const __m256i *)(q + 32 * c));
+            __m256i w = weights(q, bits, c);
             s = dot(s, _mm256_abs_epi8(w), w, repeat8(x + 8 * c));
         }
         acc = _mm256_fmadd_ps(_mm256_cvtepi32_ps(s), _mm256_mul_ps(row_scales(d), _mm256_set1_ps(xd[b])), acc);
     }
-    store_rows(out, acc);
+    store_rows(out, acc, bits);
 }
 
 // Two groups (8 rows) times four tokens: each weight load feeds four tokens.
 AVX2 static inline __attribute__((always_inline)) void x4(float *out, int ldo, const QMatrix *m, int g,
-                                                          const int8_t *x, const float *xd, Dot *dot) {
-    int blocks = m->cols / BLOCK, cols = m->cols;
+                                                          const int8_t *x, const float *xd, Dot *dot, int bits) {
+    int blocks = m->cols / BLOCK, cols = m->cols, bytes = 16 * bits;
     for (int h = 0; h < 2; h++, out += 4) {
-        const int8_t *q = m->q + (size_t)(g + h) * blocks * 128;
+        const int8_t *q = m->q + (size_t)(g + h) * blocks * bytes;
         const f16 *d = m->d + (size_t)(g + h) * blocks * 4;
         __m256 acc[4];
         for (int t = 0; t < 4; t++) acc[t] = _mm256_setzero_ps();
-        for (int b = 0; b < blocks; b++, q += 128, d += 4) {
+        for (int b = 0; b < blocks; b++, q += bytes, d += 4) {
             __m256i s[4];
             for (int t = 0; t < 4; t++) s[t] = _mm256_setzero_si256();
             for (int c = 0; c < 4; c++) {
-                __m256i w = _mm256_loadu_si256((const __m256i *)(q + 32 * c)), aw = _mm256_abs_epi8(w);
+                __m256i w = weights(q, bits, c), aw = _mm256_abs_epi8(w);
                 for (int t = 0; t < 4; t++) s[t] = dot(s[t], aw, w, repeat8(x + (size_t)t * cols + b * BLOCK + 8 * c));
             }
             for (int t = 0; t < 4; t++) {
@@ -94,17 +104,19 @@ AVX2 static inline __attribute__((always_inline)) void x4(float *out, int ldo, c
                 acc[t] = _mm256_fmadd_ps(_mm256_cvtepi32_ps(s[t]), scale, acc[t]);
             }
         }
-        for (int t = 0; t < 4; t++) store_rows(out + (size_t)t * ldo, acc[t]);
+        for (int t = 0; t < 4; t++) store_rows(out + (size_t)t * ldo, acc[t], bits);
     }
 }
 
-// x1 and x4 compiled for one instruction set, with its dot product inlined
+// x1 and x4 compiled for one instruction set and weight size, with its dot product inlined
 #define KERNELS(isa, target)                                                                                         \
     target static void x1_##isa(float *out, const QMatrix *m, int g, const int8_t *x, const float *xd) {            \
-        x1(out, m, g, x, xd, dot_##isa);                                                                             \
+        if (m->bits == 4) x1(out, m, g, x, xd, dot_##isa, 4);                                                        \
+        else x1(out, m, g, x, xd, dot_##isa, 8);                                                                     \
     }                                                                                                                \
     target static void x4_##isa(float *out, int ldo, const QMatrix *m, int g, const int8_t *x, const float *xd) {   \
-        x4(out, ldo, m, g, x, xd, dot_##isa);                                                                        \
+        if (m->bits == 4) x4(out, ldo, m, g, x, xd, dot_##isa, 4);                                                   \
+        else x4(out, ldo, m, g, x, xd, dot_##isa, 8);                                                                \
     }
 KERNELS(avx2, AVX2)
 KERNELS(avxvnni, AVXVNNI)

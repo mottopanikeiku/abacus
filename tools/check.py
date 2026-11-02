@@ -1,13 +1,14 @@
 """Check abacus against the transformers reference written by tools/reference.py.
 
-usage: uv run tools/check.py ABACUS MODEL REF_DIR [--json OUT]
+usage: uv run tools/check.py ABACUS MODEL REF_DIR [--q4] [--json OUT]
 
 The pass rule is the same for every commit:
   tokenizer       ids identical to transformers on every case
   float weights   free-running greedy tokens identical on every prompt, and
                   teacher-forced logits within MAX_ABS_ERROR of the reference
-  int8 weights    teacher-forced argmax agrees with the reference on at least
-                  MIN_INT8_AGREEMENT of positions, and mean KL <= MAX_INT8_KL
+  quantized       teacher-forced argmax agrees with the reference on at least a
+                  share of positions, and mean KL stays under a limit; both are
+                  in QUANTIZED, by weight format (--q4 runs abacus with --q4)
 Teacher forcing runs twice: one token at a time (the decode path) and the
 whole sequence in one call (the prefill path).
 """
@@ -20,8 +21,7 @@ from pathlib import Path
 import numpy as np
 
 MAX_ABS_ERROR = 0.002
-MIN_INT8_AGREEMENT = 0.90
-MAX_INT8_KL = 0.02
+QUANTIZED = {"q8_0": (0.90, 0.02), "q4_0": (0.80, 0.25)}  # minimum argmax agreement, maximum mean KL
 
 
 def run(cmd):
@@ -41,16 +41,19 @@ def main():
         i = args.index("--json")
         json_out = args[i + 1]
         del args[i:i + 2]
+    flags = ["--q4"] if "--q4" in args else []
+    args = [a for a in args if a != "--q4"]
     if len(args) != 3:
         sys.exit(__doc__)
     abacus, model, ref_dir = args
+    abacus = [abacus, model, *flags]
     ref = json.loads((Path(ref_dir) / "ref.json").read_text())
     ref_logits = np.load(Path(ref_dir) / "logits.npy", mmap_mode="r")
-    weights = run([abacus, model, "--info"]).split("weights=")[1].split()[0]
+    weights = run([*abacus, "--info"]).split("weights=")[1].split()[0]
     exact = weights in ("f32", "bf16")
     ok = True
 
-    bad = [c["text"] for c in ref["tokenizer"] if run([abacus, model, "--tokenize", c["text"]]).split() !=
+    bad = [c["text"] for c in ref["tokenizer"] if run([*abacus, "--tokenize", c["text"]]).split() !=
            [str(i) for i in c["ids"]]]
     print(f"tokenizer: {len(ref['tokenizer']) - len(bad)}/{len(ref['tokenizer'])} cases match")
     for text in bad:
@@ -60,14 +63,14 @@ def main():
     report = {"weights": weights, "prompts": []}
     for p, logits in zip(ref["prompts"], ref_logits):
         ids, greedy = p["ids"], p["greedy"]
-        out = [int(t) for t in run([abacus, model, "--ids", " ".join(map(str, ids)), "-n", str(len(greedy))]).split()]
+        out = [int(t) for t in run([*abacus, "--ids", " ".join(map(str, ids)), "-n", str(len(greedy))]).split()]
         same = next((i for i, (a, b) in enumerate(zip(out, greedy)) if a != b), len(greedy))
         row = {"prompt_tokens": len(ids), "greedy_match": same}
         ref_lp = log_softmax(np.asarray(logits))
         for name, chunk in (("decode", 1), ("prefill", 0)):
             with tempfile.NamedTemporaryFile(suffix=".f32") as f:
                 seq = " ".join(map(str, ids + greedy[:-1]))
-                run([abacus, model, "--ids", seq, "--dump-logits", f.name, "--from", str(len(ids)),
+                run([*abacus, "--ids", seq, "--dump-logits", f.name, "--from", str(len(ids)),
                      "--chunk", str(chunk)])
                 got = np.fromfile(f.name, dtype=np.float32).reshape(logits.shape)
             lp = log_softmax(got)
@@ -88,9 +91,10 @@ def main():
         ok &= all(r["greedy_match"] == len(p["greedy"]) for r, p in zip(rows, ref["prompts"]))
         ok &= all(m["max_abs_error"] <= MAX_ABS_ERROR for m in modes)
     else:
+        agreement, kl = QUANTIZED[weights]
         for mode in ("decode", "prefill"):
-            ok &= np.mean([r[mode]["argmax_agreement"] for r in rows]) >= MIN_INT8_AGREEMENT
-            ok &= np.mean([r[mode]["mean_kl"] for r in rows]) <= MAX_INT8_KL
+            ok &= np.mean([r[mode]["argmax_agreement"] for r in rows]) >= agreement
+            ok &= np.mean([r[mode]["mean_kl"] for r in rows]) <= kl
     report["pass"] = bool(ok)
     print(f"{'PASS' if ok else 'FAIL'} ({weights} weights)")
     if json_out:

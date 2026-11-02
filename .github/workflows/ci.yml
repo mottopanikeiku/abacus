@@ -17,6 +17,7 @@ jobs:
       - run: uv run tools/reference.py tiny ref-tiny
       - run: ./abacus tiny.bin --info
       - run: uv run tools/check.py ./abacus tiny.bin ref-tiny
+      - run: uv run tools/check.py ./abacus tiny.bin ref-tiny --q4
 
   x86-kernels:
     # one portable build, run as several CPU generations under Intel's emulator,
@@ -38,6 +39,7 @@ jobs:
             chmod +x sde-abacus
             ./sde-abacus tiny.bin --info
             uv run tools/check.py ./sde-abacus tiny.bin ref-tiny
+            uv run tools/check.py ./sde-abacus tiny.bin ref-tiny --q4
           done
 
   qwen3:
@@ -59,3 +61,4 @@ jobs:
       - run: test -f ref/ref.json || uv run tools/reference.py models/Qwen3-0.6B ref
       - run: ./abacus model.bin --info
       - run: uv run tools/check.py ./abacus model.bin ref
+      - run: uv run tools/check.py ./abacus model.bin ref --q4

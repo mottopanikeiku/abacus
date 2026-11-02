@@ -43,13 +43,14 @@ static inline float bf16_to_f32(bf16 h) {
     return f;
 }
 
-// int8 weights in blocks of 32 along each row, one f16 scale per block: the
-// numbers of llama.cpp's Q8_0, with values and scales in separate arrays.
-// Rows are interleaved in groups of 4; matmul.c describes the layout.
+// Weights in blocks of 32 along each row, one f16 scale per block. With 8 bits
+// these are the numbers of llama.cpp's Q8_0, with 4 bits those of its Q4_0,
+// with values and scales in separate arrays. Rows are interleaved in groups
+// of 4; matmul.c describes the layout.
 typedef struct {
-    int8_t *q; // [rows / 4][cols / 32][128]
+    int8_t *q; // [rows / 4][cols / 32][16 * bits]
     f16 *d;    // [rows / 4][cols / 32][4]
-    int rows, cols;
+    int rows, cols, bits;
 } QMatrix;
 
 typedef struct {
@@ -71,7 +72,7 @@ typedef struct {
     float *rope_cos, *rope_sin; // [position][head_dim / 2]
 } Model;
 
-Model *model_load(const char *path);
+Model *model_load(const char *path, int bits); // bits: 8, or 4 for the layer weights
 void model_free(Model *m);
 
 // Run tokens[0..n) at positions pos..pos+n. Writes logits for the last n_logits of them.
@@ -81,7 +82,7 @@ int tokenizer_encode(const Tokenizer *t, const char *text, int *out, int max);
 const char *tokenizer_piece(const Tokenizer *t, int id, int *len);
 int tokenizer_is_special(const Tokenizer *t, int id);
 
-QMatrix quantize_matrix(const bf16 *w, int rows, int cols);
+QMatrix quantize_matrix(const bf16 *w, int rows, int cols, int bits);
 void matmul(float *out, const float *x, int n, const QMatrix *w); // out[n, rows] = x[n, cols] @ w^T
 const char *matmul_kernels(void);                                 // name of the kernels in use
 

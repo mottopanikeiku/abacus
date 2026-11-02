@@ -9,6 +9,12 @@
 // row pairs it multiplies already side by side, and one 32-byte AVX2 load is
 // 8 columns of all 4 rows.
 //
+// 4-bit weights (--q4) keep the same order, two to a byte: byte i of a group's
+// 64-byte block holds value i in its low half and value i + 64 in its high
+// half, in 4-bit two's complement. byte & 0xF0, read as an int8, is then 16
+// times the high value and byte << 4 is 16 times the low one: one instruction
+// unpacks a register of weights, and the kernels divide by 16 at the end.
+//
 // This file quantizes and splits the work over threads. The products
 // themselves are kernels: plain C here, NEON in neon.c, AVX2 in x86.c, picked
 // for the CPU on first use.
@@ -18,24 +24,32 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Weights are quantized once, at load: scale = max|w| / 127 per block of a row.
-QMatrix quantize_matrix(const bf16 *w, int rows, int cols) {
+// Weights are quantized once, at load. With 8 bits, scale = max|w| / 127 per
+// block of a row. With 4 bits, scale = -m / 8 where m is the weight of largest
+// magnitude: m becomes -8 and the others land in -8..7.
+QMatrix quantize_matrix(const bf16 *w, int rows, int cols, int bits) {
     if (rows % 8 || cols % BLOCK) { // products work on 8 rows at a time
         fprintf(stderr, "abacus: matrix shape %dx%d is not a multiple of 8x32\n", rows, cols);
         exit(1);
     }
-    int blocks = cols / BLOCK;
-    QMatrix m = {malloc((size_t)rows * cols), malloc((size_t)rows * blocks * sizeof(f16)), rows, cols};
+    int blocks = cols / BLOCK, bytes = 16 * bits; // bytes = one block of a group
+    QMatrix m = {calloc((size_t)rows / 4 * blocks, bytes), malloc((size_t)rows * blocks * sizeof(f16)), rows, cols,
+                 bits};
     for (int r = 0; r < rows; r++)
         for (int b = 0; b < blocks; b++) {
             const bf16 *src = w + (size_t)r * cols + b * BLOCK;
-            float amax = 0.0f;
-            for (int i = 0; i < BLOCK; i++) amax = fmaxf(amax, fabsf(bf16_to_f32(src[i])));
-            float d = amax / 127.0f, inv = d ? 1.0f / d : 0.0f;
+            float big = 0.0f;
+            for (int i = 0; i < BLOCK; i++)
+                if (fabsf(bf16_to_f32(src[i])) > fabsf(big)) big = bf16_to_f32(src[i]);
+            float d = bits == 8 ? fabsf(big) / 127.0f : big / -8.0f, inv = d ? 1.0f / d : 0.0f;
             size_t block = (size_t)(r / 4) * blocks + b; // position of this block in group order
             m.d[block * 4 + r % 4] = (f16)d;
-            for (int i = 0; i < BLOCK; i++)
-                m.q[block * 128 + (i / 8) * 32 + (r % 4) * 8 + i % 8] = (int8_t)roundf(bf16_to_f32(src[i]) * inv);
+            int8_t *q = m.q + block * bytes;
+            for (int i = 0; i < BLOCK; i++) {
+                int k = (i / 8) * 32 + (r % 4) * 8 + i % 8, v = (int)roundf(bf16_to_f32(src[i]) * inv);
+                if (bits == 8) q[k] = (int8_t)v;
+                else q[k % 64] |= (int8_t)(((v < 7 ? v : 7) & 15) << (k < 64 ? 0 : 4));
+            }
         }
     return m;
 }
@@ -51,19 +65,27 @@ static void quantize_vector(int8_t *q, float *d, const float *x, int n) {
     }
 }
 
+// Weight k (0..127) of a group's block, 16 times too big if it has 4 bits.
+static int weight(const int8_t *q, int bits, int k) {
+    if (bits == 8) return q[k];
+    uint8_t byte = (uint8_t)q[k % 64];
+    return (int8_t)(k < 64 ? byte << 4 : byte & 0xF0);
+}
+
 // One group (4 rows) times one token, in plain C.
 static void c_x1(float *out, const QMatrix *m, int g, const int8_t *x, const float *xd) {
-    int blocks = m->cols / BLOCK;
-    const int8_t *q = m->q + (size_t)g * blocks * 128;
+    int blocks = m->cols / BLOCK, bytes = 16 * m->bits;
+    const int8_t *q = m->q + (size_t)g * blocks * bytes;
     const f16 *d = m->d + (size_t)g * blocks * 4;
     for (int r = 0; r < 4; r++) {
         float sum = 0.0f;
         for (int b = 0; b < blocks; b++) {
             int32_t isum = 0;
-            for (int i = 0; i < BLOCK; i++) isum += q[b * 128 + (i / 8) * 32 + r * 8 + i % 8] * x[b * BLOCK + i];
+            for (int i = 0; i < BLOCK; i++)
+                isum += weight(q + b * bytes, m->bits, (i / 8) * 32 + r * 8 + i % 8) * x[b * BLOCK + i];
             sum += (float)isum * ((float)d[b * 4 + r] * xd[b]);
         }
-        out[r] = sum;
+        out[r] = m->bits == 4 ? sum / 16 : sum;
     }
 }
 

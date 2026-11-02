@@ -73,10 +73,16 @@ def setup_llama(model_dir, gguf_dir):
     return bench, {fmt: gguf_dir / f"{name}-{fmt}.gguf" for fmt in LLAMA_FORMATS}
 
 
-def run_abacus(binary, model, threads, pp, tg):
-    out = sh(["taskset", "-c", f"0-{threads - 1}", binary, model, "--bench", str(pp), str(tg)])
+def run_abacus(binary, model, threads, pp, tg, flags):
+    out = sh(["taskset", "-c", f"0-{threads - 1}", binary, model, *flags, "--bench", str(pp), str(tg)])
     r = json.loads(out)
     return r["prefill_tok_s"], r["decode_tok_s"]
+
+
+def variants(binary):
+    """Ways to run a build: int8 always, and --q4 once the engine has it."""
+    usage = subprocess.run([binary], capture_output=True, text=True).stderr
+    return [[], ["--q4"]] if "--q4" in usage else [[]]
 
 
 def run_llama(bench, gguf, threads, pp, tg):
@@ -123,17 +129,20 @@ def main():
     if not args.skip_check:
         checks, report = [], args.out / "check.tmp.json"
         for i, (sha, tree, name) in steps:
-            ok = subprocess.run(["taskset", "-c", args.check_cpus, sys.executable, ROOT / "tools" / "check.py",
-                                 binaries[sha], model, args.ref, "--json", report]).returncode == 0
-            checks.append({"index": i, "tree": tree, "step": name, **json.loads(report.read_text())})
-            print(f"check {i + 1:2d} {'PASS' if ok else 'FAIL'}  {name}")
+            for flags in variants(binaries[sha]):
+                ok = subprocess.run(["taskset", "-c", args.check_cpus, sys.executable, ROOT / "tools" / "check.py",
+                                     binaries[sha], model, args.ref, *flags, "--json", report]).returncode == 0
+                checks.append({"index": i, "tree": tree, "step": name, "flags": " ".join(flags),
+                               **json.loads(report.read_text())})
+                print(f"check {i + 1:2d} {'PASS' if ok else 'FAIL'}  {name} {' '.join(flags)}")
         report.unlink()
         (args.out / "check.json").write_text(json.dumps(checks, indent=1))
 
-    runners = [("abacus", i, sha, tree, name) for i, (sha, tree, name) in steps]
+    runners = [("abacus", i, sha, tree, f"{name} {' '.join(flags)}".strip(), flags)
+               for i, (sha, tree, name) in steps for flags in variants(binaries[sha])]
     if not args.no_llama:
         bench, ggufs = setup_llama(model_dir, args.gguf_dir.expanduser())
-        runners += [("llama.cpp", None, fmt, None, f"llama.cpp {fmt}") for fmt in LLAMA_FORMATS]
+        runners += [("llama.cpp", None, fmt, None, f"llama.cpp {fmt}", []) for fmt in LLAMA_FORMATS]
 
     lock = None
     if args.lock:
@@ -148,14 +157,15 @@ def main():
     print(f"load average {os.getloadavg()[0]:.1f}; {len(runners) * len(threads) * args.reps} runs")
     for rep in range(args.reps):
         for t in threads:
-            for kind, index, key, tree, label in random.sample(runners, len(runners)):
+            for kind, index, key, tree, label, flags in random.sample(runners, len(runners)):
                 if kind == "abacus":
-                    pp_ts, tg_ts = run_abacus(binaries[key], model, t, args.pp, args.tg)
+                    pp_ts, tg_ts = run_abacus(binaries[key], model, t, args.pp, args.tg, flags)
                 else:
                     pp_ts, tg_ts = run_llama(bench, ggufs[key], t, args.pp, args.tg)
-                row = {"runner": kind, "index": index, "tree": tree, "label": label, "threads": t, "rep": rep,
-                       "pp": args.pp, "tg": args.tg, "prefill_tok_s": pp_ts, "decode_tok_s": tg_ts,
-                       "time": time.strftime("%Y-%m-%dT%H:%M:%S"), "load": round(os.getloadavg()[0], 2)}
+                row = {"runner": kind, "index": index, "tree": tree, "label": label, "flags": " ".join(flags),
+                       "threads": t, "rep": rep, "pp": args.pp, "tg": args.tg, "prefill_tok_s": pp_ts,
+                       "decode_tok_s": tg_ts, "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                       "load": round(os.getloadavg()[0], 2)}
                 raw.write(json.dumps(row) + "\n")
                 raw.flush()
                 print(f"rep {rep} t={t:2d} {label[:44]:44s} prefill {pp_ts:8.1f}  decode {tg_ts:7.1f}")

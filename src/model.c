@@ -43,9 +43,9 @@ static const bf16 *read_bf16(Reader *r, size_t n) {
     return p;
 }
 
-// Matrices are quantized to int8 as they are read.
-static QMatrix read_matrix(Reader *r, int rows, int cols) {
-    return quantize_matrix(read_bf16(r, (size_t)rows * cols), rows, cols);
+// Matrices are quantized as they are read.
+static QMatrix read_matrix(Reader *r, int rows, int cols, int bits) {
+    return quantize_matrix(read_bf16(r, (size_t)rows * cols), rows, cols, bits);
 }
 
 // Small vectors (norm weights) are widened to float once.
@@ -56,7 +56,7 @@ static float *read_f32(Reader *r, size_t n) {
     return dst;
 }
 
-Model *model_load(const char *path) {
+Model *model_load(const char *path, int bits) {
     int fd = open(path, O_RDONLY);
     if (fd < 0) die("cannot open model file");
     struct stat st;
@@ -90,16 +90,17 @@ Model *model_load(const char *path) {
         // taller matrix: one product per set instead of three or two.
         Layer *L = &m->layers[l];
         L->attn_norm = read_f32(&r, dim);
-        L->wqkv = read_matrix(&r, q_dim + 2 * kv_dim, dim);
-        L->wo = read_matrix(&r, dim, q_dim);
+        L->wqkv = read_matrix(&r, q_dim + 2 * kv_dim, dim, bits);
+        L->wo = read_matrix(&r, dim, q_dim, bits);
         L->q_norm = read_f32(&r, hd);
         L->k_norm = read_f32(&r, hd);
         L->ffn_norm = read_f32(&r, dim);
-        L->w_gate_up = read_matrix(&r, 2 * hidden, dim);
-        L->w_down = read_matrix(&r, dim, hidden);
+        L->w_gate_up = read_matrix(&r, 2 * hidden, dim, bits);
+        L->w_down = read_matrix(&r, dim, hidden, bits);
     }
     m->norm = read_f32(&r, dim);
-    m->lm_head = tied ? quantize_matrix(m->embed, c->vocab_size, dim) : read_matrix(&r, c->vocab_size, dim);
+    // the output layer stays at 8 bits: 4 cost too much accuracy for its speed
+    m->lm_head = tied ? quantize_matrix(m->embed, c->vocab_size, dim, 8) : read_matrix(&r, c->vocab_size, dim, 8);
     if (r.off > (size_t)st.st_size) die("model file is truncated");
 
     m->x = xcalloc((size_t)BATCH * dim, sizeof(float));

@@ -14,6 +14,7 @@ static const char *usage =
     "  --temp T         sampling temperature, 0 = greedy (default 0.7)\n"
     "  --seed S         sampling seed\n"
     "  --raw            continue the prompt as plain text, no chat template\n"
+    "  --q4             4-bit layer weights (half the memory traffic, less accurate)\n"
     "  --bench PP TG    time a PP-token prefill and a TG-token decode, print JSON\n"
     "  --tokenize TEXT  print token ids\n"
     "  --ids \"1 2 3\"    start from token ids; prints N greedy token ids\n"
@@ -106,7 +107,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     const char *prompt = "Why is the ocean salty?", *ids_arg = NULL, *dump = NULL, *text = NULL;
-    int steps = 512, raw = 0, info = 0, from = 1, chunk = 0, pp = 0, tg = 0, threads = default_threads();
+    int steps = 512, raw = 0, info = 0, from = 1, chunk = 0, pp = 0, tg = 0, bits = 8, threads = default_threads();
     float temp = 0.7f;
     uint64_t seed = (uint64_t)time(NULL);
     for (int i = 2; i < argc; i++) {
@@ -118,6 +119,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--temp") && more) temp = (float)atof(argv[++i]);
         else if (!strcmp(a, "--seed") && more) seed = strtoull(argv[++i], NULL, 10);
         else if (!strcmp(a, "--raw")) raw = 1;
+        else if (!strcmp(a, "--q4")) bits = 4;
         else if (!strcmp(a, "--bench") && i + 2 < argc) pp = atoi(argv[++i]), tg = atoi(argv[++i]);
         else if (!strcmp(a, "--tokenize") && more) text = argv[++i];
         else if (!strcmp(a, "--ids") && more) ids_arg = argv[++i];
@@ -131,7 +133,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    Model *m = model_load(argv[1]);
+    Model *m = model_load(argv[1], bits);
     pool_start(threads);
     const Config *c = &m->c;
     int vocab = c->vocab_size;
@@ -139,8 +141,8 @@ int main(int argc, char **argv) {
     float *logits = malloc(vocab * sizeof(float));
 
     if (info) {
-        printf("qwen3 dim=%d hidden=%d layers=%d heads=%d/%d head_dim=%d vocab=%d weights=q8_0 kernels=%s\n", c->dim,
-               c->hidden_dim, c->n_layers, c->n_heads, c->n_kv_heads, c->head_dim, vocab, matmul_kernels());
+        printf("qwen3 dim=%d hidden=%d layers=%d heads=%d/%d head_dim=%d vocab=%d weights=q%d_0 kernels=%s\n", c->dim,
+               c->hidden_dim, c->n_layers, c->n_heads, c->n_kv_heads, c->head_dim, vocab, bits, matmul_kernels());
     } else if (text) {
         int n = tokenizer_encode(&m->tok, text, tokens, c->seq_len);
         for (int i = 0; i < n; i++) printf(i ? " %d" : "%d", tokens[i]);
